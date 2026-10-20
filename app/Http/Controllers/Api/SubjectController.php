@@ -1,0 +1,260 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\EnrollmentApplication;
+use App\Models\Grade;
+use App\Models\Student;
+use App\Models\Subject;
+use App\Models\User;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
+
+class SubjectController extends Controller
+{
+    public function store(Request $request)
+    {
+        $this->normalizeCode($request);
+        $this->normalizeSchedule($request);
+        $data = $this->validateSubject($request);
+        $subject = Subject::create($this->map($data));
+
+        return response()->json($subject, 201);
+    }
+
+    public function update(Request $request, Subject $subject)
+    {
+        if ($request->user()->role?->slug === 'faculty') {
+            if ($subject->faculty_id !== $request->user()->id) {
+                return response()->json(['message' => 'You may only update grading weights for your assigned subjects.'], 403);
+            }
+
+            $weights = $request->validate([
+                'grade_weights' => ['sometimes', 'required', 'array', 'size:3'],
+                'grade_weights.*' => ['integer', 'min:0', 'max:100'],
+                'component_weights' => ['sometimes', 'required', 'array', 'size:3'],
+                'component_weights.*' => ['integer', 'min:0', 'max:100'],
+            ]);
+            if (! isset($weights['grade_weights']) && ! isset($weights['component_weights'])) {
+                throw ValidationException::withMessages([
+                    'grade_weights' => ['Provide at least one set of grading weights to update.'],
+                ]);
+            }
+            $periodWeights = $weights['grade_weights'] ?? $subject->grade_weights;
+            $componentWeights = $weights['component_weights'] ?? $subject->component_weights ?? [30, 50, 20];
+            if (array_sum($periodWeights) !== 100) {
+                throw ValidationException::withMessages(['grade_weights' => ['Grade weights must total 100.']]);
+            }
+            if (array_sum($componentWeights) !== 100) {
+                throw ValidationException::withMessages([
+                    'component_weights' => ['Written Works, Performance Tasks, and Exams weights must total 100.'],
+                ]);
+            }
+
+            $oldComponentWeights = $subject->component_weights ?? [30, 50, 20];
+            $subject->update([
+                'grade_weights' => $periodWeights,
+                'component_weights' => $componentWeights,
+            ]);
+            if ($oldComponentWeights !== $subject->component_weights) {
+                $this->recalculateComponentGrades($subject);
+            }
+
+            return response()->json($subject->fresh());
+        }
+
+        $this->normalizeCode($request);
+        $this->normalizeSchedule($request);
+        $data = $this->validateSubject($request, $subject);
+        $oldComponentWeights = $subject->component_weights ?? [30, 50, 20];
+        $subject->update($this->map($data, $subject));
+        if ($oldComponentWeights !== $subject->component_weights) {
+            $this->recalculateComponentGrades($subject);
+        }
+
+        return response()->json($subject->fresh());
+    }
+
+    public function destroy(Subject $subject)
+    {
+        $assignedToApplicant = EnrollmentApplication::query()->whereJsonContains('requested_subjects', $subject->code)->exists();
+        if ($subject->students()->exists() || $assignedToApplicant
+            || DB::table('grades')->where('subject_code', $subject->code)->exists()) {
+            return response()->json(['message' => 'Remove this subject from student loads and grades before deleting it.'], 422);
+        }
+        $subject->delete();
+
+        return response()->noContent();
+    }
+
+    public function assignFaculty(Request $request, User $user)
+    {
+        if ($user->role?->slug !== 'faculty') {
+            throw ValidationException::withMessages(['user' => ['Subjects can only be assigned to a faculty account.']]);
+        }
+        $data = $request->validate(['codes' => ['present', 'array'], 'codes.*' => ['string', 'distinct', 'exists:subjects,code']]);
+        $subjects = Subject::whereIn('code', $data['codes'])->get();
+        if ($subjects->sum('units') > 24) {
+            throw ValidationException::withMessages(['codes' => ['Faculty load cannot exceed 24 units.']]);
+        }
+        $this->assertNoScheduleClashes($subjects);
+        Subject::where('faculty_id', $user->id)->update(['faculty_id' => null]);
+        Subject::whereIn('code', $data['codes'])->update(['faculty_id' => $user->id]);
+
+        return response()->noContent();
+    }
+
+    public function assignStudent(Request $request, Student $student)
+    {
+        $data = $request->validate(['codes' => ['required', 'array', 'min:1'], 'codes.*' => ['string', 'distinct', 'exists:subjects,code']]);
+        $subjects = Subject::whereIn('code', $data['codes'])->get();
+        if ($subjects->sum('units') > 27) {
+            throw ValidationException::withMessages(['codes' => ['Student course load cannot exceed 27 units.']]);
+        }
+        $this->assertNoScheduleClashes($subjects);
+        $removedCodes = $student->subjects()->whereNotIn('subjects.code', $data['codes'])->pluck('subjects.code');
+        if ($removedCodes->isNotEmpty()) {
+            DB::table('grades')->where('student_id', $student->id)->whereIn('subject_code', $removedCodes)->delete();
+        }
+        $student->subjects()->sync($data['codes']);
+
+        return response()->noContent();
+    }
+
+    private function validateSubject(Request $request, ?Subject $subject = null): array
+    {
+        $required = $subject ? ['sometimes', 'required'] : ['required'];
+
+        return $request->validate([
+            'code' => [...$required, 'string', 'regex:/^[A-Z]{2,4}\d{3}$/', 'max:10',
+                Rule::unique('subjects', 'code')->ignore($subject?->code, 'code')],
+            'name' => [...$required, 'string', 'min:3', 'max:255'],
+            'units' => [...$required, 'integer', 'min:1', 'max:6'],
+            'days' => [...$required, 'string', 'max:50'],
+            'start_time' => [...$required, 'date_format:H:i'],
+            'end_time' => [...$required, 'date_format:H:i'],
+            'room' => [...$required, 'string', 'max:50'],
+            'program' => [...$required, 'string', 'max:20'],
+            'year_level' => [...$required, 'string', 'max:10'],
+            'grade_weights' => [...$required, 'array', 'size:3'],
+            'grade_weights.*' => ['integer', 'min:0', 'max:100'],
+            'component_weights' => ['sometimes', 'required', 'array', 'size:3'],
+            'component_weights.*' => ['integer', 'min:0', 'max:100'],
+            'faculty_id' => ['nullable', 'exists:users,id'],
+        ]);
+    }
+
+    private function normalizeCode(Request $request): void
+    {
+        $code = $request->input('code');
+        if (is_string($code)) {
+            $request->merge(['code' => strtoupper(trim($code))]);
+        }
+    }
+
+    private function normalizeSchedule(Request $request): void
+    {
+        if ($request->filled('start_time') || $request->filled('end_time')
+            || ! is_string($request->input('meeting_time'))) {
+            return;
+        }
+
+        if (preg_match('/^\s*(\d{1,2}):(\d{2})\s*(AM|PM)?\s*[–-]\s*(\d{1,2}):(\d{2})\s*(AM|PM)?\s*$/i',
+            $request->input('meeting_time'), $matches)) {
+            $startPeriod = strtoupper($matches[3] ?: $matches[6]);
+            $endPeriod = strtoupper($matches[6] ?: $matches[3]);
+            $start = $this->time24((int) $matches[1], (int) $matches[2], $startPeriod);
+            $end = $this->time24((int) $matches[4], (int) $matches[5], $endPeriod);
+            if ($start !== null && $end !== null) {
+                $request->merge(['start_time' => $start, 'end_time' => $end]);
+            }
+        }
+    }
+
+    private function time24(int $hour, int $minute, string $period): ?string
+    {
+        if ($minute > 59 || ($period !== '' && ($hour < 1 || $hour > 12)) || ($period === '' && $hour > 23)) {
+            return null;
+        }
+        if ($period !== '') {
+            $hour = ($hour % 12) + ($period === 'PM' ? 12 : 0);
+        }
+
+        return sprintf('%02d:%02d', $hour, $minute);
+    }
+
+    private function map(array $data, ?Subject $subject = null): array
+    {
+        $startTime = $data['start_time'] ?? $subject?->start_time;
+        $endTime = $data['end_time'] ?? $subject?->end_time;
+        if ($startTime === null || $endTime === null || $endTime <= $startTime) {
+            throw ValidationException::withMessages([
+                'end_time' => ['End time must be later than start time.'],
+            ]);
+        }
+
+        $weights = $data['grade_weights'] ?? $subject?->grade_weights ?? [30, 30, 40];
+        if (array_sum($weights) !== 100) {
+            throw ValidationException::withMessages(['grade_weights' => ['Grade weights must total 100.']]);
+        }
+        $componentWeights = $data['component_weights'] ?? $subject?->component_weights ?? [30, 50, 20];
+        if (array_sum($componentWeights) !== 100) {
+            throw ValidationException::withMessages([
+                'component_weights' => ['Written Works, Performance Tasks, and Exams weights must total 100.'],
+            ]);
+        }
+        $facultyId = $data['faculty_id'] ?? $subject?->faculty_id;
+        if (! empty($facultyId) && User::with('role')->find($facultyId)?->role?->slug !== 'faculty') {
+            throw ValidationException::withMessages(['faculty_id' => ['Assign this subject to a faculty account.']]);
+        }
+
+        return [
+            'name' => $data['name'] ?? $subject?->name,
+            'units' => $data['units'] ?? $subject?->units,
+            'days' => $data['days'] ?? $subject?->days,
+            'start_time' => $startTime, 'end_time' => $endTime,
+            'meeting_time' => $startTime.'-'.$endTime, 'room' => $data['room'] ?? $subject?->room,
+            'program' => $data['program'] ?? $subject?->program,
+            'year_level' => (string) ($data['year_level'] ?? $subject?->year_level),
+            'grade_weights' => $weights, 'component_weights' => $componentWeights,
+            'faculty_id' => $facultyId,
+        ] + (isset($data['code']) ? ['code' => strtoupper($data['code'])] : []);
+    }
+
+    private function recalculateComponentGrades(Subject $subject): void
+    {
+        $weights = $subject->component_weights ?? [30, 50, 20];
+        Grade::where('subject_code', $subject->code)
+            ->whereNotNull('written_works')
+            ->whereNotNull('performance_tasks')
+            ->whereNotNull('exams')
+            ->each(function (Grade $grade) use ($weights) {
+                $grade->update(['score' => round((
+                    $grade->written_works * $weights[0]
+                    + $grade->performance_tasks * $weights[1]
+                    + $grade->exams * $weights[2]
+                ) / 100, 2)]);
+            });
+    }
+
+    private function assertNoScheduleClashes(iterable $subjects): void
+    {
+        $subjects = collect($subjects)->values();
+        for ($i = 0; $i < $subjects->count(); $i++) {
+            for ($j = $i + 1; $j < $subjects->count(); $j++) {
+                $first = $subjects[$i];
+                $second = $subjects[$j];
+                $sharedDays = array_intersect(explode('/', $first->days), explode('/', $second->days));
+                if ($first->start_time < $second->end_time && $second->start_time < $first->end_time
+                    && $sharedDays !== []) {
+                    throw ValidationException::withMessages([
+                        'codes' => ['Schedule conflict: '.$first->code.' and '.$second->code.' overlap.'],
+                    ]);
+                }
+            }
+        }
+    }
+}
