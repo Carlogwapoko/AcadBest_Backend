@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\EnrollmentApplication;
 use App\Models\Student;
 use App\Models\User;
+use App\Services\StandingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -36,6 +37,23 @@ class AcadBestApiTest extends TestCase
         ])->assertUnprocessable();
     }
 
+    public function test_standing_rules_are_read_once_per_service_instance(): void
+    {
+        $queries = 0;
+        DB::listen(function ($query) use (&$queries): void {
+            if (str_contains($query->sql, 'portal_settings')) {
+                $queries++;
+            }
+        });
+
+        $standing = app(StandingService::class);
+        $first = $standing->rules();
+        $second = $standing->rules();
+
+        $this->assertSame($first, $second);
+        $this->assertSame(1, $queries);
+    }
+
     public function test_logout_revokes_token_and_protected_routes_reject_unauthenticated_requests(): void
     {
         $login = $this->postJson('/api/auth/login', [
@@ -56,12 +74,16 @@ class AcadBestApiTest extends TestCase
         $this->withToken($facultyToken)->postJson('/api/users', [])->assertForbidden();
 
         $registrarToken = $this->token('registrar@aces.edu.ph');
-        $this->withToken($registrarToken)->putJson('/api/enrollments/'.$application->reference, [
+        $approval = $this->withToken($registrarToken)->putJson('/api/enrollments/'.$application->reference, [
             'status' => 'Enrolled',
         ])->assertOk()->assertJsonPath('status', 'Enrolled');
+        $approvedSchoolId = $approval->json('school_id');
+        $this->assertMatchesRegularExpression('/^\d{10}$/', $approvedSchoolId);
         $this->assertDatabaseHas('enrollment_applications', [
             'reference' => $application->reference, 'student_status' => 'New Student',
         ]);
+        $enrolledStudent = Student::where('enrollment_application_id', $application->id)->firstOrFail();
+        $this->assertSame($approvedSchoolId, $enrolledStudent->school_id);
 
         $adminToken = $this->token('admin@aces.edu.ph');
         $faculty = User::where('email', 'faculty@aces.edu.ph')->firstOrFail();
@@ -76,9 +98,17 @@ class AcadBestApiTest extends TestCase
             'role' => 'Student',
             'password' => 'Issued-Student-2026!',
             'application_ref' => $application->reference,
-        ])->assertCreated()->assertJsonPath('role', 'Student');
+        ])->assertCreated()->assertJsonPath('role', 'Student')
+            ->assertJsonPath('school_id', $approvedSchoolId);
 
         $student = User::with('student')->where('email', 'issued.student@aces.edu.ph')->firstOrFail();
+        $this->assertSame($approvedSchoolId, $student->student->school_id);
+        $this->assertMatchesRegularExpression('/^\d{10}$/', $student->student->school_id);
+        $this->assertDatabaseHas('students', [
+            'id' => $student->student->id,
+            'school_id' => $student->student->school_id,
+        ]);
+        $this->assertSame(1, DB::table('students')->where('school_id', $student->student->school_id)->count());
         $this->assertSame('Marie', $student->middle_name);
         $this->assertSame('New Student', $student->student->status);
         $this->assertInstanceOf(Student::class, $student->student);
@@ -102,14 +132,43 @@ class AcadBestApiTest extends TestCase
         $this->withToken($studentToken)->getJson('/api/portal')
             ->assertOk()->assertJsonPath('students.0.name', $application->name)
             ->assertJsonPath('students.0.middle_name', 'Marie Louise')
+            ->assertJsonPath('students.0.school_id', $student->student->school_id)
             ->assertJsonPath('students.0.status', 'New Student');
+        $this->withToken($studentToken)->getJson('/api/auth/me')
+            ->assertOk()->assertJsonPath('user.school_id', $student->student->school_id);
         $this->withToken($registrarToken)->getJson('/api/enrollments')
             ->assertOk()->assertJsonPath('data.0.ref', $application->reference)
             ->assertJsonPath('data.0.session', 'Weekends')
             ->assertJsonPath('data.0.middle_name', 'Marie')
+            ->assertJsonPath('data.0.school_id', $student->student->school_id)
             ->assertJsonPath('data.0.student_status', 'New Student');
         $this->withToken($adminToken)->getJson('/api/users')
-            ->assertOk()->assertJsonPath('total', 5);
+            ->assertOk()->assertJsonPath('total', 5)
+            ->assertJsonFragment(['school_id' => $student->student->school_id]);
+    }
+
+    public function test_school_ids_are_not_created_for_pending_or_rejected_applications(): void
+    {
+        $application = $this->submitApplication();
+        $registrarToken = $this->token('registrar@aces.edu.ph');
+        $adminToken = $this->token('admin@aces.edu.ph');
+        $initialStudentCount = DB::table('students')->count();
+        $account = [
+            'name' => $application->name,
+            'email' => 'test.applicant@example.com',
+            'role' => 'Student',
+            'password' => 'Issued-Student-2026!',
+            'application_ref' => $application->reference,
+        ];
+
+        $this->withToken($adminToken)->postJson('/api/users', $account)->assertUnprocessable();
+        $this->assertSame($initialStudentCount, DB::table('students')->count());
+
+        $this->withToken($registrarToken)->putJson('/api/enrollments/'.$application->reference, [
+            'status' => 'Rejected',
+        ])->assertOk();
+        $this->withToken($adminToken)->postJson('/api/users', $account)->assertUnprocessable();
+        $this->assertSame($initialStudentCount, DB::table('students')->count());
     }
 
     public function test_faculty_grade_entry_is_saved_and_returned_to_the_student(): void
@@ -150,7 +209,9 @@ class AcadBestApiTest extends TestCase
                     'student_id' => $student->id, 'written_works' => 80,
                     'performance_tasks' => 90, 'exams' => 100,
                 ]],
-            ])->assertNoContent();
+            ])->assertOk()->assertJsonStructure(['students' => [(string) $student->id => [
+                'gwa', 'status', 'declining',
+            ]]]);
         }
 
         $this->assertDatabaseHas('grades', [
@@ -165,7 +226,7 @@ class AcadBestApiTest extends TestCase
             ->assertJsonPath('students.0.gc.IT301.0.written_works', 80);
         $this->withToken($this->token('faculty@aces.edu.ph'))->putJson('/api/subjects/IT301', [
             'component_weights' => [20, 30, 50],
-        ])->assertOk();
+        ])->assertOk()->assertJsonPath('students.'.$student->id.'.gwa', 93);
         $this->assertDatabaseHas('grades', [
             'student_id' => $student->id, 'subject_code' => 'IT301', 'term' => 'Prelim', 'score' => 93,
         ]);

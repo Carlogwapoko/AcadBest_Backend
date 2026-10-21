@@ -14,14 +14,19 @@ use Illuminate\Support\Facades\Mail;
 class StandingService
 {
     public const TERMS = ['Prelim', 'Midterm', 'Final'];
+    private ?array $cachedRules = null;
 
     /** Configurable rules from Admin → Standing Rules. 'trend' = points drop that triggers monitoring. */
     public function rules(): array
     {
+        if ($this->cachedRules !== null) {
+            return $this->cachedRules;
+        }
+
         $raw = DB::table('portal_settings')->where('key', 'standing_rules')->value('value');
         $r = $raw ? json_decode($raw, true) : [];
 
-        return [
+        return $this->cachedRules = [
             'pass' => $r['pass'] ?? 75,
             'safe' => $r['safe'] ?? 80,
             'trend' => $r['trend'] ?? 5,
@@ -149,10 +154,12 @@ class StandingService
         if (! $to) {
             return;
         }
-        try {
-            Mail::to($to)->send(new PortalNotice($title, $body));
-        } catch (\Throwable $e) {
-            report($e); // never block grade saving because of e-mail
-        }
+        dispatch(function () use ($to, $title, $body) {
+            try {
+                Mail::to($to)->send(new PortalNotice($title, $body));
+            } catch (\Throwable $error) {
+                report($error);
+            }
+        })->afterResponse();
     }
 }

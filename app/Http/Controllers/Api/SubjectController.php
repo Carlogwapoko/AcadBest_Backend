@@ -8,6 +8,7 @@ use App\Models\Grade;
 use App\Models\Student;
 use App\Models\Subject;
 use App\Models\User;
+use App\Services\StandingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -25,7 +26,7 @@ class SubjectController extends Controller
         return response()->json($subject, 201);
     }
 
-    public function update(Request $request, Subject $subject)
+    public function update(Request $request, Subject $subject, StandingService $standing)
     {
         if ($request->user()->role?->slug === 'faculty') {
             if ($subject->faculty_id !== $request->user()->id) {
@@ -54,6 +55,7 @@ class SubjectController extends Controller
                 ]);
             }
 
+            $oldGradeWeights = $subject->grade_weights ?? [30, 30, 40];
             $oldComponentWeights = $subject->component_weights ?? [30, 50, 20];
             $subject->update([
                 'grade_weights' => $periodWeights,
@@ -63,19 +65,30 @@ class SubjectController extends Controller
                 $this->recalculateComponentGrades($subject);
             }
 
-            return response()->json($subject->fresh());
+            $standings = $oldGradeWeights !== $subject->grade_weights
+                || $oldComponentWeights !== $subject->component_weights
+                    ? $this->refreshStandings($subject, $standing)
+                    : [];
+
+            return response()->json($subject->fresh()->toArray() + ['students' => $standings]);
         }
 
         $this->normalizeCode($request);
         $this->normalizeSchedule($request);
         $data = $this->validateSubject($request, $subject);
+        $oldGradeWeights = $subject->grade_weights ?? [30, 30, 40];
         $oldComponentWeights = $subject->component_weights ?? [30, 50, 20];
         $subject->update($this->map($data, $subject));
         if ($oldComponentWeights !== $subject->component_weights) {
             $this->recalculateComponentGrades($subject);
         }
 
-        return response()->json($subject->fresh());
+        $standings = $oldGradeWeights !== $subject->grade_weights
+            || $oldComponentWeights !== $subject->component_weights
+                ? $this->refreshStandings($subject, $standing)
+                : [];
+
+        return response()->json($subject->fresh()->toArray() + ['students' => $standings]);
     }
 
     public function destroy(Subject $subject)
@@ -238,6 +251,25 @@ class SubjectController extends Controller
                     + $grade->exams * $weights[2]
                 ) / 100, 2)]);
             });
+    }
+
+    private function refreshStandings(Subject $subject, StandingService $standing): array
+    {
+        $studentIds = Grade::where('subject_code', $subject->code)
+            ->distinct()
+            ->pluck('student_id');
+        $updated = [];
+
+        foreach ($studentIds as $studentId) {
+            $result = $standing->refresh(Student::findOrFail($studentId));
+            $updated[$studentId] = [
+                'gwa' => $result['gwa'],
+                'status' => $result['status'],
+                'declining' => $result['declining'],
+            ];
+        }
+
+        return $updated;
     }
 
     private function assertNoScheduleClashes(iterable $subjects): void

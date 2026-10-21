@@ -4,7 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Grade;
+use App\Models\Student;
 use App\Models\Subject;
+use App\Services\StandingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -12,11 +14,11 @@ use Illuminate\Validation\ValidationException;
 
 class GradeController extends Controller
 {
-    public function storeBatch(Request $request)
+    public function storeBatch(Request $request, StandingService $standing)
     {
         $data = $request->validate([
             'subject_code' => ['required', 'exists:subjects,code'],
-            'term' => ['required', Rule::in(['Prelim', 'Midterm', 'Final'])],
+            'term' => ['required', Rule::in(StandingService::TERMS)],
             'grades' => ['required', 'array', 'min:1'],
             'grades.*.student_id' => ['required', 'integer', 'exists:students,id'],
             'grades.*.score' => ['sometimes', 'nullable', 'numeric', 'between:0,100'],
@@ -30,12 +32,11 @@ class GradeController extends Controller
             return response()->json(['message' => 'You may only enter grades for your assigned subjects.'], 403);
         }
 
-        DB::transaction(function () use ($data, $subject) {
+        $touched = [];
+        DB::transaction(function () use ($data, $subject, &$touched) {
+            $componentKeys = ['written_works', 'performance_tasks', 'exams'];
             foreach ($data['grades'] as $entry) {
-                $componentKeys = ['written_works', 'performance_tasks', 'exams'];
-                $componentCount = collect($componentKeys)->filter(
-                    fn ($key) => isset($entry[$key])
-                )->count();
+                $componentCount = collect($componentKeys)->filter(fn ($k) => isset($entry[$k]))->count();
                 if ($componentCount !== 0 && $componentCount !== count($componentKeys)) {
                     throw ValidationException::withMessages([
                         'grades' => ['Enter a score for Written Works, Performance Tasks, and Exams.'],
@@ -49,65 +50,53 @@ class GradeController extends Controller
                 if (! $subject->students()->whereKey($entry['student_id'])->exists()) {
                     throw ValidationException::withMessages(['grades' => ['Every student must be enrolled in this subject.']]);
                 }
-                $gradeValues = [];
+
                 if ($componentCount === count($componentKeys)) {
-                    $weights = $subject->component_weights ?? [30, 50, 20];
-                    $gradeValues = [
+                    $w = $subject->component_weights ?? [30, 50, 20];
+                    $values = [
                         'written_works' => $entry['written_works'],
                         'performance_tasks' => $entry['performance_tasks'],
                         'exams' => $entry['exams'],
-                        'score' => round(
-                            ($entry['written_works'] * $weights[0]
-                                + $entry['performance_tasks'] * $weights[1]
-                                + $entry['exams'] * $weights[2]) / 100,
-                            2
-                        ),
+                        'score' => round(($entry['written_works'] * $w[0]
+                            + $entry['performance_tasks'] * $w[1]
+                            + $entry['exams'] * $w[2]) / 100, 2),
                     ];
                 } else {
-                    $gradeValues = [
+                    $values = [
                         'score' => $entry['score'],
-                        'written_works' => null,
-                        'performance_tasks' => null,
-                        'exams' => null,
+                        'written_works' => null, 'performance_tasks' => null, 'exams' => null,
                     ];
                 }
-                Grade::updateOrCreate(
-                    ['student_id' => $entry['student_id'], 'subject_code' => $subject->code, 'term' => $data['term']],
-                    $gradeValues
-                );
-                DB::table('portal_notifications')->insert([
-                    'student_id' => $entry['student_id'], 'type' => 'grade',
-                    'title' => 'New grade posted',
-                    'message' => $subject->code.' '.$data['term'].': '.$gradeValues['score'].'.',
-                    'is_read' => false, 'created_at' => now(), 'updated_at' => now(),
-                ]);
 
-                $grades = Grade::where('student_id', $entry['student_id'])
-                    ->where('subject_code', $subject->code)->get()->keyBy('term');
-                $weights = $subject->grade_weights ?? [30, 30, 40];
-                $weightedTotal = 0;
-                $weightTotal = 0;
-                foreach (['Prelim', 'Midterm', 'Final'] as $index => $term) {
-                    $score = $grades->get($term)?->score;
-                    if ($score !== null) {
-                        $weightedTotal += $score * $weights[$index];
-                        $weightTotal += $weights[$index];
-                    }
-                }
-                $thresholds = DB::table('portal_settings')->where('key', 'standing_rules')->value('value');
-                $passing = $thresholds ? (json_decode($thresholds, true)['pass'] ?? 75) : 75;
-                if ($weightTotal && $weightedTotal / $weightTotal < $passing) {
+                $grade = Grade::updateOrCreate(
+                    ['student_id' => $entry['student_id'], 'subject_code' => $subject->code, 'term' => $data['term']],
+                    $values
+                );
+
+                // Notify only when the grade is new or really changed.
+                if ($grade->wasRecentlyCreated || $grade->wasChanged('score')) {
                     DB::table('portal_notifications')->insert([
-                        'student_id' => $entry['student_id'], 'type' => 'alert',
-                        'title' => 'Grade alert',
-                        'message' => 'Your current weighted average in '.$subject->code.' is '
-                            .number_format($weightedTotal / $weightTotal, 1).'. Please consult your instructor.',
+                        'student_id' => $entry['student_id'], 'type' => 'grade',
+                        'title' => 'New grade posted',
+                        'message' => $subject->code.' '.$data['term'].': '.$values['score'].'.',
                         'is_read' => false, 'created_at' => now(), 'updated_at' => now(),
                     ]);
                 }
+                $touched[$entry['student_id']] = true;
             }
         });
 
-        return response()->noContent();
+        // Grades are saved first, then the standing check runs (as described in the paper).
+        $updatedStandings = [];
+        foreach (array_keys($touched) as $studentId) {
+            $result = $standing->refresh(Student::findOrFail($studentId));
+            $updatedStandings[$studentId] = [
+                'gwa' => $result['gwa'],
+                'status' => $result['status'],
+                'declining' => $result['declining'],
+            ];
+        }
+
+        return response()->json(['students' => $updatedStandings]);
     }
 }

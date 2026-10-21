@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\EnrollmentApplication;
+use App\Models\Student;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -17,7 +18,7 @@ class EnrollmentController extends Controller
         $status = $request->query('status');
         $pendingAccountsOnly = $request->boolean('pending_accounts');
         $perPage = min(max((int) $request->query('per_page', 25), 1), 50);
-        $applications = EnrollmentApplication::query()
+        $applications = EnrollmentApplication::query()->with('student')
             ->when($status && $status !== 'All', fn ($query) => $query->where('status', $status))
             ->when($pendingAccountsOnly, fn ($query) => $query->where('status', 'Enrolled')->where('account_issued', false))
             ->when($search !== '', fn ($query) => $query->where(function ($query) use ($search) {
@@ -79,6 +80,7 @@ class EnrollmentController extends Controller
             'student_status' => $application->student_status,
             'email' => $application->email, 'prog' => $application->program,
             'yr' => $application->year_level, 'st' => $application->status,
+            'school_id' => $application->student?->school_id,
             'note' => $application->reviewer_note ?? '',
             'log' => collect($application->history)->map(fn ($item) => [$item['date'], $item['action']])->all(),
         ]);
@@ -104,23 +106,52 @@ class EnrollmentController extends Controller
             throw ValidationException::withMessages(['status' => ['An application with an issued account cannot be changed from Enrolled.']]);
         }
 
-        DB::transaction(function () use ($data, $enrollment) {
-            $history = $enrollment->history ?? [];
+        $schoolId = DB::transaction(function () use ($data, $enrollment) {
+            $application = EnrollmentApplication::whereKey($enrollment->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
+            $student = Student::where('enrollment_application_id', $application->id)
+                ->lockForUpdate()
+                ->first();
+
+            if ($data['status'] === 'Enrolled') {
+                $student ??= Student::create([
+                    'enrollment_application_id' => $application->id,
+                    'program' => $application->program,
+                    'year_level' => $application->year_level,
+                    'section' => 'A',
+                    'status' => 'New Student',
+                ]);
+                $student->assignSchoolId();
+            } elseif (! $application->account_issued) {
+                $student?->delete();
+                $student = null;
+            }
+
+            $history = $application->history ?? [];
             $history[] = ['date' => now()->format('M d'), 'action' => match ($data['status']) {
                 'Enrolled' => 'Approved – officially enrolled',
                 'Rejected' => 'Application rejected',
                 'Under Review' => 'Under review by the registrar',
                 default => 'Pending',
             }];
-            $enrollment->update([
+            $application->update([
                 'status' => $data['status'],
                 'student_status' => $data['status'] === 'Enrolled' ? 'New Student' : 'Applicant',
-                'reviewer_note' => $data['note'] ?? $enrollment->reviewer_note,
+                'reviewer_note' => $data['note'] ?? $application->reviewer_note,
                 'history' => $history,
             ]);
+
+            return $student?->school_id;
         });
 
-        return response()->json(['status' => $enrollment->status, 'note' => $enrollment->reviewer_note]);
+        $enrollment->refresh();
+
+        return response()->json([
+            'status' => $enrollment->status,
+            'note' => $enrollment->reviewer_note,
+            'school_id' => $schoolId,
+        ]);
     }
 
     private function present(EnrollmentApplication $application): array
@@ -137,6 +168,7 @@ class EnrollmentController extends Controller
             'gph' => $application->guardian_phone, 'st' => $application->status,
             'date' => $application->created_at->format('M d'), 'note' => $application->reviewer_note ?? '',
             'acct' => $application->account_issued, 'subs' => $application->requested_subjects ?? [],
+            'school_id' => $application->student?->school_id,
             'log' => collect($application->history)->map(fn ($item) => [$item['date'], $item['action']])->all(),
         ];
     }

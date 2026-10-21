@@ -14,12 +14,12 @@ class ServiceRequest extends Model
 
     protected $fillable = [
         'reference', 'student_id', 'type', 'purpose', 'copies', 'date_needed',
-        'remarks', 'status', 'history',
+        'remarks', 'status', 'history', 'completed_at'
     ];
 
     protected function casts(): array
     {
-        return ['date_needed' => 'date:Y-m-d', 'history' => 'array'];
+        return ['date_needed' => 'date:Y-m-d', 'history' => 'array', 'completed_at' => 'datetime'];
     }
 
     public function student(): BelongsTo

@@ -6,23 +6,25 @@ use App\Http\Controllers\Controller;
 use App\Models\Role;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Services\StandingService;
 
 class SettingsController extends Controller
 {
-    public function rules(Request $request)
-    {
-        $data = $request->validate([
-            'pass' => ['required', 'integer', 'between:50,95'],
-            'safe' => ['required', 'integer', 'gt:pass', 'lte:100'],
-        ]);
-        DB::table('portal_settings')->updateOrInsert(
-            ['key' => 'standing_rules'],
-            ['value' => json_encode($data), 'updated_at' => now(), 'created_at' => now()]
-        );
+    public function rules(Request $request, StandingService $standing)
+{
+    $data = $request->validate([
+        'pass' => ['required', 'integer', 'between:50,95'],
+        'safe' => ['required', 'integer', 'gt:pass', 'lte:100'],
+        'trend' => ['sometimes', 'integer', 'between:1,30'],
+    ]);
+    $data['trend'] ??= $standing->rules()['trend']; // dili ma-reset kung ang UI pass/safe ra ang gipadala
+    DB::table('portal_settings')->updateOrInsert(
+        ['key' => 'standing_rules'],
+        ['value' => json_encode($data), 'updated_at' => now(), 'created_at' => now()]
+    );
 
-        return response()->json($data);
-    }
-
+    return response()->json(['pass' => $data['pass'], 'safe' => $data['safe']]);
+}
     public function setModule(Request $request)
     {
         $data = $request->validate([

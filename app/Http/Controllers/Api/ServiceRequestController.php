@@ -58,7 +58,7 @@ class ServiceRequestController extends Controller
         $reference = 'REQ-'.strtoupper(bin2hex(random_bytes(3)));
         $serviceRequest = ServiceRequest::create($data + [
             'reference' => $reference, 'student_id' => $student->id,
-            'history' => [['date' => now()->format('M d'), 'action' => 'Submitted']],
+            'history' => [['date' => now()->format('M d'), 'at' => now()->toIso8601String(), 'action' => 'Submitted']],
         ]);
 
         return response()->json(['reference' => $serviceRequest->reference], 201);
@@ -85,12 +85,27 @@ class ServiceRequestController extends Controller
         $action = $data['status'] === 'Rejected' && ! empty($data['remarks'])
             ? 'Rejected – '.$data['remarks']
             : $data['status'];
-        $history[] = ['date' => now()->format('M d'), 'action' => $action];
+        $history[] = ['date' => now()->format('M d'), 'at' => now()->toIso8601String(), 'action' => $action];
         $serviceRequest->update([
-            'status' => $data['status'], 'history' => $history,
-            'remarks' => $data['remarks'] ?? $serviceRequest->remarks,
-        ]);
+    'status' => $data['status'], 'history' => $history,
+    'remarks' => $data['remarks'] ?? $serviceRequest->remarks,
+    'completed_at' => in_array($data['status'], ['Completed', 'Rejected'], true) ? now() : null,
+]);
 
         return response()->noContent();
     }
+
+    public function metrics()
+{
+    $done = ServiceRequest::where('status', 'Completed')->whereNotNull('completed_at')->get();
+    $minutes = $done->map(fn ($r) => $r->created_at->diffInMinutes($r->completed_at));
+
+    return response()->json([
+        'completed' => $done->count(),
+        'avg_processing_hours' => $minutes->isEmpty() ? null : round($minutes->avg() / 60, 1),
+        'by_type' => $done->groupBy('type')->map(fn ($g) => round(
+            $g->avg(fn ($r) => $r->created_at->diffInMinutes($r->completed_at)) / 60, 1
+        )),
+    ]);
+}
 }

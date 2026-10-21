@@ -30,6 +30,8 @@ The default database is SQLite at `database/database.sqlite`. An existing `.env`
 
 Change the demo password before using these accounts outside local development. The seeder creates the Student account's required academic profile, but no sample grades, requests, applications, announcements, or extra accounts; portal records are managed through the UI/API.
 
+When Registrar Staff approves an application, the system creates the official student record and assigns a unique 10-digit School ID (year plus the student record number, for example `2026001460`). The ID is shown with the approved application and is included in the student account and profile once the administrator provisions the account. Pending or rejected applications do not receive a School ID.
+
 ## API
 
 User, enrollment, and service-request list endpoints are paginated (`25` records by default, capped at `50`) and accept `page` and `search` query parameters. Enrollment lists also accept `status`; service-request lists accept `status` and `type`. The Angular client requests additional pages as needed instead of downloading the complete lists.

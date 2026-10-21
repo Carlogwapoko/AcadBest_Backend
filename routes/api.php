@@ -46,5 +46,6 @@ Route::middleware('api.token')->group(function () {
         Route::delete('/subjects/{subject}', [SubjectController::class, 'destroy']);
         Route::put('/faculty/{user}/subjects', [SubjectController::class, 'assignFaculty']);
         Route::put('/students/{student}/subjects', [SubjectController::class, 'assignStudent']);
+        Route::get('/requests/metrics', [ServiceRequestController::class, 'metrics']);
     });
 });

@@ -79,13 +79,20 @@ class UserController extends Controller
             ]);
 
             if ($role->slug === 'student') {
-                $student = Student::create([
-                    'user_id' => $user->id,
-                    'program' => $application->program,
-                    'year_level' => $application->year_level,
-                    'section' => $validated['section'] ?? 'A',
-                    'status' => $application->student_status,
-                ]);
+                $student = Student::where('enrollment_application_id', $application->id)
+                    ->lockForUpdate()
+                    ->first();
+                if (! $student) {
+                    $student = Student::create([
+                        'enrollment_application_id' => $application->id,
+                        'program' => $application->program,
+                        'year_level' => $application->year_level,
+                        'section' => $validated['section'] ?? 'A',
+                        'status' => $application->student_status,
+                    ]);
+                }
+                $student->assignSchoolId();
+                $student->update(['user_id' => $user->id, 'section' => $validated['section'] ?? $student->section]);
                 $student->subjects()->sync($application->requested_subjects ?? []);
                 $application->update(['account_issued' => true, 'user_id' => $user->id]);
             }
@@ -212,6 +219,7 @@ class UserController extends Controller
             'id' => $user->id, 'name' => $user->name, 'middle_name' => $user->middle_name, 'email' => $user->email,
             'role' => $user->role?->name, 'active' => $user->is_active,
             'phone' => $user->phone ?? '', 'student_id' => $user->student?->id,
+            'school_id' => $user->student?->school_id,
             'program' => $user->student?->program, 'year_level' => $user->student?->year_level,
             'avatar' => $user->avatar_path ? asset('storage/'.$user->avatar_path) : null,
         ];

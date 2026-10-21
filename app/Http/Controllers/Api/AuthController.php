@@ -61,6 +61,7 @@ class AuthController extends Controller
             'phone' => $user->phone ?? '',
             'active' => $user->is_active,
             'student_id' => $user->student?->id,
+            'school_id' => $user->student?->school_id,
             'avatar' => $user->avatar_path ? asset('storage/'.$user->avatar_path) : null,
         ];
     }
