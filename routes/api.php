@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Route;
 Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
 Route::post('/enrollments', [EnrollmentController::class, 'store'])->middleware('throttle:10,1');
 Route::post('/enrollments/track', [EnrollmentController::class, 'track'])->middleware('throttle:20,1');
+Route::get('/settings/academic-year', [SettingsController::class, 'academicYear']);
 
 Route::middleware('api.token')->group(function () {
     Route::get('/auth/me', [AuthController::class, 'me']);
@@ -36,6 +37,7 @@ Route::middleware('api.token')->group(function () {
         Route::put('/users/{user}', [UserController::class, 'update']);
         Route::delete('/users/{user}', [UserController::class, 'destroy']);
         Route::put('/settings/rules', [SettingsController::class, 'rules']);
+        Route::put('/settings/academic-year', [SettingsController::class, 'updateAcademicYear']);
         Route::put('/settings/modules', [SettingsController::class, 'setModule']);
     });
 

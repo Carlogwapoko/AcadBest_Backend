@@ -5,6 +5,8 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\EnrollmentApplication;
 use App\Models\Student;
+use App\Models\Subject;
+use App\Services\AcademicYearService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -33,11 +35,21 @@ class EnrollmentController extends Controller
         return response()->json($applications->through(fn (EnrollmentApplication $application) => $this->present($application)));
     }
 
-    public function store(Request $request)
+    public function store(Request $request, AcademicYearService $academicYear)
     {
+        foreach (['first_name', 'middle_name', 'last_name'] as $field) {
+            $value = $request->input($field);
+            if (is_string($value)) {
+                $request->merge([$field => trim($value) === '' ? null : trim($value)]);
+            }
+        }
+        $request->merge(['academic_year' => $academicYear->current()]);
+
         $data = $request->validate([
-            'name' => ['required', 'string', 'min:2', 'max:255'],
+            'first_name' => ['required', 'string', 'min:2', 'max:255'],
             'middle_name' => ['nullable', 'string', 'max:255'],
+            'last_name' => ['required', 'string', 'min:2', 'max:255'],
+            'academic_year' => ['required', 'string', 'regex:/^\d{4}-\d{4}$/', 'max:9'],
             'email' => ['required', 'email', 'max:255'],
             'phone' => ['required', 'string', 'max:30'],
             'date_of_birth' => ['required', 'date', 'before:today'],
@@ -52,6 +64,12 @@ class EnrollmentController extends Controller
             'guardian_phone' => ['required', 'string', 'max:30'],
             'certified' => ['required', 'accepted'],
         ]);
+        if (! $academicYear->isValid($data['academic_year'])) {
+            throw ValidationException::withMessages([
+                'academic_year' => ['Choose a valid academic year, such as 2026-2027.'],
+            ]);
+        }
+        $data['name'] = $this->fullName($data['first_name'], $data['middle_name'] ?? null, $data['last_name']);
         $data['reference'] = 'ENR-'.now()->format('Y').'-'.strtoupper(bin2hex(random_bytes(3)));
         $data['status'] = 'Pending';
         $data['history'] = [['date' => now()->format('M d'), 'action' => 'Application submitted']];
@@ -76,10 +94,13 @@ class EnrollmentController extends Controller
 
         return response()->json([
             'ref' => $application->reference, 'name' => $application->name,
+            'first_name' => $application->first_name,
+            'last_name' => $application->last_name,
             'middle_name' => $application->middle_name,
             'student_status' => $application->student_status,
             'email' => $application->email, 'prog' => $application->program,
             'yr' => $application->year_level, 'st' => $application->status,
+            'academic_year' => $application->academic_year,
             'school_id' => $application->student?->school_id,
             'note' => $application->reviewer_note ?? '',
             'log' => collect($application->history)->map(fn ($item) => [$item['date'], $item['action']])->all(),
@@ -95,6 +116,14 @@ class EnrollmentController extends Controller
             'subjects.*' => ['string', 'exists:subjects,code'],
         ]);
         if (isset($data['subjects']) && ! isset($data['status'])) {
+            if ($enrollment->session && Subject::query()
+                ->whereIn('code', $data['subjects'])
+                ->whereNotIn('session', ['All', $enrollment->session])
+                ->exists()) {
+                throw ValidationException::withMessages([
+                    'subjects' => ['The subject load must match the applicant’s selected session.'],
+                ]);
+            }
             $enrollment->update(['requested_subjects' => $data['subjects']]);
 
             return response()->noContent();
@@ -121,7 +150,11 @@ class EnrollmentController extends Controller
                     'year_level' => $application->year_level,
                     'section' => 'A',
                     'status' => 'New Student',
+                    'session' => $application->session,
                 ]);
+                if ($student->session === null) {
+                    $student->update(['session' => $application->session]);
+                }
                 $student->assignSchoolId();
             } elseif (! $application->account_issued) {
                 $student?->delete();
@@ -157,12 +190,16 @@ class EnrollmentController extends Controller
     private function present(EnrollmentApplication $application): array
     {
         return [
-            'ref' => $application->reference, 'name' => $application->name, 'email' => $application->email,
-            'phone' => $application->phone, 'dob' => $application->date_of_birth->format('Y-m-d'),
+            'ref' => $application->reference, 'name' => $application->name,
+            'first_name' => $application->first_name,
             'middle_name' => $application->middle_name,
+            'last_name' => $application->last_name,
+            'email' => $application->email,
+            'phone' => $application->phone, 'dob' => $application->date_of_birth->format('Y-m-d'),
             'student_status' => $application->student_status,
             'sex' => $application->sex, 'addr' => $application->address, 'prog' => $application->program,
             'yr' => $application->year_level, 'session' => $application->session,
+            'academic_year' => $application->academic_year,
             'type' => $application->application_type,
             'school' => $application->previous_school, 'gname' => $application->guardian_name,
             'gph' => $application->guardian_phone, 'st' => $application->status,
@@ -171,5 +208,13 @@ class EnrollmentController extends Controller
             'school_id' => $application->student?->school_id,
             'log' => collect($application->history)->map(fn ($item) => [$item['date'], $item['action']])->all(),
         ];
+    }
+
+    private function fullName(?string $first, ?string $middle, ?string $last): string
+    {
+        return implode(' ', array_filter(
+            array_map(fn (?string $part): string => trim($part ?? ''), [$first, $middle, $last]),
+            fn (string $part): bool => $part !== ''
+        ));
     }
 }

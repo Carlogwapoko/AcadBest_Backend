@@ -20,11 +20,8 @@ class GradeController extends Controller
             'subject_code' => ['required', 'exists:subjects,code'],
             'term' => ['required', Rule::in(StandingService::TERMS)],
             'grades' => ['required', 'array', 'min:1'],
-            'grades.*.student_id' => ['required', 'integer', 'exists:students,id'],
-            'grades.*.score' => ['sometimes', 'nullable', 'numeric', 'between:0,100'],
-            'grades.*.written_works' => ['sometimes', 'nullable', 'numeric', 'between:0,100'],
-            'grades.*.performance_tasks' => ['sometimes', 'nullable', 'numeric', 'between:0,100'],
-            'grades.*.exams' => ['sometimes', 'nullable', 'numeric', 'between:0,100'],
+            'grades.*.student_id' => ['required', 'integer', 'distinct', 'exists:students,id'],
+            'grades.*.score' => ['required', 'numeric', 'between:0,100'],
         ]);
         $subject = Subject::findOrFail($data['subject_code']);
         $actor = $request->user();
@@ -34,39 +31,12 @@ class GradeController extends Controller
 
         $touched = [];
         DB::transaction(function () use ($data, $subject, &$touched) {
-            $componentKeys = ['written_works', 'performance_tasks', 'exams'];
             foreach ($data['grades'] as $entry) {
-                $componentCount = collect($componentKeys)->filter(fn ($k) => isset($entry[$k]))->count();
-                if ($componentCount !== 0 && $componentCount !== count($componentKeys)) {
-                    throw ValidationException::withMessages([
-                        'grades' => ['Enter a score for Written Works, Performance Tasks, and Exams.'],
-                    ]);
-                }
-                if ($componentCount === 0 && ! isset($entry['score'])) {
-                    throw ValidationException::withMessages([
-                        'grades' => ['Enter component scores or a legacy period score.'],
-                    ]);
-                }
                 if (! $subject->students()->whereKey($entry['student_id'])->exists()) {
                     throw ValidationException::withMessages(['grades' => ['Every student must be enrolled in this subject.']]);
                 }
 
-                if ($componentCount === count($componentKeys)) {
-                    $w = $subject->component_weights ?? [30, 50, 20];
-                    $values = [
-                        'written_works' => $entry['written_works'],
-                        'performance_tasks' => $entry['performance_tasks'],
-                        'exams' => $entry['exams'],
-                        'score' => round(($entry['written_works'] * $w[0]
-                            + $entry['performance_tasks'] * $w[1]
-                            + $entry['exams'] * $w[2]) / 100, 2),
-                    ];
-                } else {
-                    $values = [
-                        'score' => $entry['score'],
-                        'written_works' => null, 'performance_tasks' => null, 'exams' => null,
-                    ];
-                }
+                $values = ['score' => $entry['score']];
 
                 $grade = Grade::updateOrCreate(
                     ['student_id' => $entry['student_id'], 'subject_code' => $subject->code, 'term' => $data['term']],

@@ -4,11 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\EnrollmentApplication;
-use App\Models\Grade;
 use App\Models\Student;
 use App\Models\Subject;
 use App\Models\User;
-use App\Services\StandingService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -26,69 +24,18 @@ class SubjectController extends Controller
         return response()->json($subject, 201);
     }
 
-    public function update(Request $request, Subject $subject, StandingService $standing)
+    public function update(Request $request, Subject $subject)
     {
         if ($request->user()->role?->slug === 'faculty') {
-            if ($subject->faculty_id !== $request->user()->id) {
-                return response()->json(['message' => 'You may only update grading weights for your assigned subjects.'], 403);
-            }
-
-            $weights = $request->validate([
-                'grade_weights' => ['sometimes', 'required', 'array', 'size:3'],
-                'grade_weights.*' => ['integer', 'min:0', 'max:100'],
-                'component_weights' => ['sometimes', 'required', 'array', 'size:3'],
-                'component_weights.*' => ['integer', 'min:0', 'max:100'],
-            ]);
-            if (! isset($weights['grade_weights']) && ! isset($weights['component_weights'])) {
-                throw ValidationException::withMessages([
-                    'grade_weights' => ['Provide at least one set of grading weights to update.'],
-                ]);
-            }
-            $periodWeights = $weights['grade_weights'] ?? $subject->grade_weights;
-            $componentWeights = $weights['component_weights'] ?? $subject->component_weights ?? [30, 50, 20];
-            if (array_sum($periodWeights) !== 100) {
-                throw ValidationException::withMessages(['grade_weights' => ['Grade weights must total 100.']]);
-            }
-            if (array_sum($componentWeights) !== 100) {
-                throw ValidationException::withMessages([
-                    'component_weights' => ['Written Works, Performance Tasks, and Exams weights must total 100.'],
-                ]);
-            }
-
-            $oldGradeWeights = $subject->grade_weights ?? [30, 30, 40];
-            $oldComponentWeights = $subject->component_weights ?? [30, 50, 20];
-            $subject->update([
-                'grade_weights' => $periodWeights,
-                'component_weights' => $componentWeights,
-            ]);
-            if ($oldComponentWeights !== $subject->component_weights) {
-                $this->recalculateComponentGrades($subject);
-            }
-
-            $standings = $oldGradeWeights !== $subject->grade_weights
-                || $oldComponentWeights !== $subject->component_weights
-                    ? $this->refreshStandings($subject, $standing)
-                    : [];
-
-            return response()->json($subject->fresh()->toArray() + ['students' => $standings]);
+            return response()->json(['message' => 'Faculty grades are entered by grading period.'], 403);
         }
 
         $this->normalizeCode($request);
         $this->normalizeSchedule($request);
         $data = $this->validateSubject($request, $subject);
-        $oldGradeWeights = $subject->grade_weights ?? [30, 30, 40];
-        $oldComponentWeights = $subject->component_weights ?? [30, 50, 20];
         $subject->update($this->map($data, $subject));
-        if ($oldComponentWeights !== $subject->component_weights) {
-            $this->recalculateComponentGrades($subject);
-        }
 
-        $standings = $oldGradeWeights !== $subject->grade_weights
-            || $oldComponentWeights !== $subject->component_weights
-                ? $this->refreshStandings($subject, $standing)
-                : [];
-
-        return response()->json($subject->fresh()->toArray() + ['students' => $standings]);
+        return response()->json($subject->fresh()->toArray());
     }
 
     public function destroy(Subject $subject)
@@ -124,14 +71,17 @@ class SubjectController extends Controller
     {
         $data = $request->validate(['codes' => ['required', 'array', 'min:1'], 'codes.*' => ['string', 'distinct', 'exists:subjects,code']]);
         $subjects = Subject::whereIn('code', $data['codes'])->get();
+        if ($student->session && $subjects->contains(
+            fn (Subject $subject) => $subject->session !== 'All' && $subject->session !== $student->session
+        )) {
+            throw ValidationException::withMessages([
+                'codes' => ['A student can only be assigned subjects offered in their selected session.'],
+            ]);
+        }
         if ($subjects->sum('units') > 27) {
             throw ValidationException::withMessages(['codes' => ['Student course load cannot exceed 27 units.']]);
         }
         $this->assertNoScheduleClashes($subjects);
-        $removedCodes = $student->subjects()->whereNotIn('subjects.code', $data['codes'])->pluck('subjects.code');
-        if ($removedCodes->isNotEmpty()) {
-            DB::table('grades')->where('student_id', $student->id)->whereIn('subject_code', $removedCodes)->delete();
-        }
         $student->subjects()->sync($data['codes']);
 
         return response()->noContent();
@@ -152,10 +102,9 @@ class SubjectController extends Controller
             'room' => [...$required, 'string', 'max:50'],
             'program' => [...$required, 'string', 'max:20'],
             'year_level' => [...$required, 'string', 'max:10'],
-            'grade_weights' => [...$required, 'array', 'size:3'],
-            'grade_weights.*' => ['integer', 'min:0', 'max:100'],
-            'component_weights' => ['sometimes', 'required', 'array', 'size:3'],
-            'component_weights.*' => ['integer', 'min:0', 'max:100'],
+            'session' => ['sometimes', 'required', Rule::in(['All', 'Afternoon', 'Evening', 'Weekends'])],
+            'semester' => ['sometimes', 'nullable', Rule::in(['1st Semester', '2nd Semester', 'Summer'])],
+            'academic_year' => ['nullable', 'string', 'regex:/^\d{4}-\d{4}$/', 'max:9'],
             'faculty_id' => ['nullable', 'exists:users,id'],
         ]);
     }
@@ -209,16 +158,6 @@ class SubjectController extends Controller
             ]);
         }
 
-        $weights = $data['grade_weights'] ?? $subject?->grade_weights ?? [30, 30, 40];
-        if (array_sum($weights) !== 100) {
-            throw ValidationException::withMessages(['grade_weights' => ['Grade weights must total 100.']]);
-        }
-        $componentWeights = $data['component_weights'] ?? $subject?->component_weights ?? [30, 50, 20];
-        if (array_sum($componentWeights) !== 100) {
-            throw ValidationException::withMessages([
-                'component_weights' => ['Written Works, Performance Tasks, and Exams weights must total 100.'],
-            ]);
-        }
         $facultyId = $data['faculty_id'] ?? $subject?->faculty_id;
         if (! empty($facultyId) && User::with('role')->find($facultyId)?->role?->slug !== 'faculty') {
             throw ValidationException::withMessages(['faculty_id' => ['Assign this subject to a faculty account.']]);
@@ -232,44 +171,13 @@ class SubjectController extends Controller
             'meeting_time' => $startTime.'-'.$endTime, 'room' => $data['room'] ?? $subject?->room,
             'program' => $data['program'] ?? $subject?->program,
             'year_level' => (string) ($data['year_level'] ?? $subject?->year_level),
-            'grade_weights' => $weights, 'component_weights' => $componentWeights,
+            'session' => $data['session'] ?? $subject?->session ?? 'All',
+            'semester' => array_key_exists('semester', $data) ? $data['semester'] : $subject?->semester,
+            'academic_year' => array_key_exists('academic_year', $data)
+                ? $data['academic_year']
+                : $subject?->academic_year,
             'faculty_id' => $facultyId,
         ] + (isset($data['code']) ? ['code' => strtoupper($data['code'])] : []);
-    }
-
-    private function recalculateComponentGrades(Subject $subject): void
-    {
-        $weights = $subject->component_weights ?? [30, 50, 20];
-        Grade::where('subject_code', $subject->code)
-            ->whereNotNull('written_works')
-            ->whereNotNull('performance_tasks')
-            ->whereNotNull('exams')
-            ->each(function (Grade $grade) use ($weights) {
-                $grade->update(['score' => round((
-                    $grade->written_works * $weights[0]
-                    + $grade->performance_tasks * $weights[1]
-                    + $grade->exams * $weights[2]
-                ) / 100, 2)]);
-            });
-    }
-
-    private function refreshStandings(Subject $subject, StandingService $standing): array
-    {
-        $studentIds = Grade::where('subject_code', $subject->code)
-            ->distinct()
-            ->pluck('student_id');
-        $updated = [];
-
-        foreach ($studentIds as $studentId) {
-            $result = $standing->refresh(Student::findOrFail($studentId));
-            $updated[$studentId] = [
-                'gwa' => $result['gwa'],
-                'status' => $result['status'],
-                'declining' => $result['declining'],
-            ];
-        }
-
-        return $updated;
     }
 
     private function assertNoScheduleClashes(iterable $subjects): void

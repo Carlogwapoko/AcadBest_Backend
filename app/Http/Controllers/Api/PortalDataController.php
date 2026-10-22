@@ -24,10 +24,11 @@ class PortalDataController extends Controller
 
         $subjectQuery = Subject::query();
         $studentQuery = Student::query()
-            ->select(['id', 'user_id', 'school_id', 'status', 'program', 'year_level', 'section'])
+            ->select(['id', 'user_id', 'school_id', 'enrollment_application_id', 'status', 'program', 'year_level', 'section', 'session'])
             ->with([
-                'user:id,name,middle_name',
-                'subjects:code,name,units,days,meeting_time,start_time,end_time,room,program,year_level,grade_weights,component_weights,faculty_id',
+                'user:id,name,first_name,middle_name,last_name',
+                'enrollmentApplication:id,academic_year',
+                'subjects:code,name,units,days,meeting_time,start_time,end_time,room,program,year_level,faculty_id,session,semester,academic_year',
             ]);
 
         if ($role === 'student') {
@@ -99,20 +100,30 @@ class PortalDataController extends Controller
         }
 
         // Retrieve grades once
-        $gradeRows = $students->isEmpty() || $subjectCodes->isEmpty()
+        $gradeRows = $students->isEmpty() || ($role !== 'student' && $subjectCodes->isEmpty())
             ? collect()
             : Grade::query()
                 ->whereIn('student_id', $students->modelKeys())
-                ->whereIn('subject_code', $subjectCodes)
-                ->get(['student_id', 'subject_code', 'term', 'score', 'written_works', 'performance_tasks', 'exams']);
+                ->when($role !== 'student', fn ($query) => $query->whereIn('subject_code', $subjectCodes))
+                ->get(['student_id', 'subject_code', 'term', 'score']);
 
         // Group grades by student
         $gradesByStudent = $gradeRows->groupBy('student_id');
+        $gradedSubjects = $gradeRows->isEmpty()
+            ? collect()
+            : Subject::whereIn('code', $gradeRows->pluck('subject_code')->unique())
+                ->get(['code', 'name', 'units', 'days', 'meeting_time', 'start_time', 'end_time', 'room',
+                    'program', 'year_level', 'faculty_id', 'session', 'semester', 'academic_year'])
+                ->keyBy('code');
+        if ($role === 'student') {
+            $subjects = $subjects->concat($gradedSubjects->values())->unique('code');
+        }
 
         // Student grades and academic standing
         $studentRows = $students->map(
             function (Student $record) use (
                 $gradesByStudent,
+                $gradedSubjects,
                 $standing
             ) {
                 $own = $gradesByStudent->get(
@@ -122,6 +133,9 @@ class PortalDataController extends Controller
                 $gradesByTerm = $own->keyBy(
                     fn (Grade $grade) => $grade->subject_code.'|'.$grade->term
                 );
+                $recordSubjects = $record->subjects->concat(
+                    $gradedSubjects->only($own->pluck('subject_code')->unique()->all())->values()
+                )->unique('code');
 
                 $summary = $standing->evaluate(
                     $record->subjects,
@@ -129,9 +143,7 @@ class PortalDataController extends Controller
                 );
 
                 $grades = [];
-                $components = [];
-
-                foreach ($record->subjects as $subject) {
+                foreach ($recordSubjects as $subject) {
                     $grades[$subject->code] = collect([
                         'Prelim',
                         'Midterm',
@@ -140,41 +152,26 @@ class PortalDataController extends Controller
                         fn ($term) => $gradesByTerm->get($subject->code.'|'.$term)?->score
                     )->all();
 
-                    $components[$subject->code] = collect([
-                        'Prelim',
-                        'Midterm',
-                        'Final',
-                    ])->map(function ($term) use ($gradesByTerm, $subject) {
-                        $grade = $gradesByTerm->get($subject->code.'|'.$term);
-
-                        if (! $grade || (
-                            $grade->written_works === null
-                            && $grade->performance_tasks === null
-                            && $grade->exams === null
-                        )) {
-                            return null;
-                        }
-
-                        return [
-                            'written_works' => $grade->written_works,
-                            'performance_tasks' => $grade->performance_tasks,
-                            'exams' => $grade->exams,
-                        ];
-                    })->all();
                 }
 
                 return [
                     'id' => $record->id,
-                    'name' => $record->user?->name ?? 'Unlinked student',
+                    'name' => $record->user
+                        ? ($this->fullName($record->user->first_name, $record->user->middle_name, $record->user->last_name)
+                            ?: $record->user->name)
+                        : 'Unlinked student',
+                    'first_name' => $record->user?->first_name,
                     'middle_name' => $record->user?->middle_name,
+                    'last_name' => $record->user?->last_name,
                     'school_id' => $record->school_id,
+                    'session' => $record->session,
+                    'academic_year' => $record->enrollmentApplication?->academic_year,
+                    'subject_codes' => $record->subjects->pluck('code')->values(),
                     'status' => $record->status,
                     'prog' => $record->program,
                     'yr' => $record->year_level,
                     'sec' => $record->section,
                     'g' => $grades,
-                    'gc' => $components,
-
                     'gwa' => $summary['gwa'],
                     'st' => $summary['status'],
                     'declining' => $summary['declining'],
@@ -191,7 +188,7 @@ class PortalDataController extends Controller
             ->join('roles', 'roles.id', '=', 'module_access.role_id')
             ->get(['roles.slug', 'module_access.module_key'])
             ->map(
-                fn ($row) => $row->slug . ':' . $row->module_key
+                fn ($row) => $row->slug.':'.$row->module_key
             )
             ->values();
 
@@ -217,15 +214,18 @@ class PortalDataController extends Controller
             'users' => $facultyUsers->map(
                 fn (User $record) => [
                     'id' => $record->id,
-                    'name' => $record->name,
+                    'name' => $this->fullName($record->first_name, $record->middle_name, $record->last_name)
+                        ?: $record->name,
+                    'first_name' => $record->first_name,
                     'middle_name' => $record->middle_name,
+                    'last_name' => $record->last_name,
                     'email' => '',
                     'role' => $record->role?->name,
                     'act' => $record->is_active,
                     'phone' => $record->phone ?? '',
                     'sid' => null,
                     'avatar' => $record->avatar_path
-                        ? asset('storage/' . $record->avatar_path)
+                        ? asset('storage/'.$record->avatar_path)
                         : null,
                 ]
             ),
@@ -240,21 +240,22 @@ class PortalDataController extends Controller
                         'tm' => $subject->start_time
                             && $subject->end_time
                                 ? $subject->start_time
-                                    . '–'
-                                    . $subject->end_time
+                                    .'–'
+                                    .$subject->end_time
                                 : $subject->meeting_time,
 
                         'start' => $subject->start_time,
                         'end' => $subject->end_time,
                         'r' => $subject->room,
                         'p' => $subject->program,
+                        'session' => $subject->session,
+                        'semester' => $subject->semester,
+                        'academic_year' => $subject->academic_year,
 
                         'y' => is_numeric($subject->year_level)
                             ? (int) $subject->year_level
                             : $subject->year_level,
 
-                        'w' => $subject->grade_weights,
-                        'cw' => $subject->component_weights ?? [30, 50, 20],
                         'f' => $subject->faculty_id,
                     ],
                 ]
@@ -330,5 +331,13 @@ class PortalDataController extends Controller
                 'Copy of Grades',
             ],
         ]);
+    }
+
+    private function fullName(?string $first, ?string $middle, ?string $last): string
+    {
+        return implode(' ', array_filter(
+            array_map(fn (?string $part): string => trim($part ?? ''), [$first, $middle, $last]),
+            fn (string $part): bool => $part !== ''
+        ));
     }
 }

@@ -14,8 +14,8 @@ class EnrollmentApplication extends Model
     }
 
     protected $fillable = [
-        'reference', 'name', 'middle_name', 'email', 'phone', 'date_of_birth', 'sex', 'address',
-        'program', 'year_level', 'session', 'application_type', 'previous_school',
+        'reference', 'name', 'first_name', 'middle_name', 'last_name', 'email', 'phone', 'date_of_birth', 'sex', 'address',
+        'program', 'year_level', 'session', 'academic_year', 'application_type', 'previous_school',
         'guardian_name', 'guardian_phone', 'status', 'student_status', 'reviewer_note',
         'account_issued', 'requested_subjects', 'history', 'user_id',
     ];

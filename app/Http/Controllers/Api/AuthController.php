@@ -51,10 +51,19 @@ class AuthController extends Controller
 
     private function present(User $user): array
     {
+        $name = implode(' ', array_filter(
+            array_map(fn (?string $part): string => trim($part ?? ''), [
+                $user->first_name, $user->middle_name, $user->last_name,
+            ]),
+            fn (?string $part): bool => $part !== ''
+        )) ?: $user->name;
+
         return [
             'id' => $user->id,
-            'name' => $user->name,
+            'name' => $name,
+            'first_name' => $user->first_name,
             'middle_name' => $user->middle_name,
+            'last_name' => $user->last_name,
             'email' => $user->email,
             'role' => $user->role?->name,
             'role_key' => $user->role?->slug,

@@ -35,9 +35,11 @@ class UserController extends Controller
 
     public function store(Request $request)
     {
+        $this->fillNameFieldsFromApplication($request);
         $validated = $request->validate([
-            'name' => ['required', 'string', 'min:3', 'max:255'],
+            'first_name' => ['required', 'string', 'min:2', 'max:255'],
             'middle_name' => ['nullable', 'string', 'max:255'],
+            'last_name' => ['required', 'string', 'min:2', 'max:255'],
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
             'role' => ['required', 'exists:roles,name'],
             'password' => ['required', 'string', 'min:8'],
@@ -68,9 +70,27 @@ class UserController extends Controller
                     'application_ref' => ['This approved application already has an account or is no longer eligible.'],
                 ]);
             }
+            if ($application && (! $application->first_name || ! $application->last_name)) {
+                throw ValidationException::withMessages([
+                    'application_ref' => ['The applicant first and last names are unavailable, so an account cannot be created.'],
+                ]);
+            }
+            $student = $application
+                ? Student::where('enrollment_application_id', $application->id)->lockForUpdate()->first()
+                : null;
+            if ($student?->user_id) {
+                throw ValidationException::withMessages([
+                    'application_ref' => ['This student record is already linked to an account. Update that account instead.'],
+                ]);
+            }
+            $firstName = $application ? $application->first_name : $validated['first_name'];
+            $middleName = $application ? $application->middle_name : ($validated['middle_name'] ?? null);
+            $lastName = $application ? $application->last_name : $validated['last_name'];
             $user = User::create([
-                'name' => trim($validated['name']),
-                'middle_name' => $application?->middle_name ?? ($validated['middle_name'] ?? null),
+                'name' => $this->fullName($firstName, $middleName, $lastName),
+                'first_name' => trim($firstName),
+                'middle_name' => $middleName === null ? null : trim($middleName),
+                'last_name' => trim($lastName),
                 'email' => strtolower(trim($validated['email'])),
                 'password' => Hash::make($validated['password']),
                 'role_id' => $role->id,
@@ -79,9 +99,6 @@ class UserController extends Controller
             ]);
 
             if ($role->slug === 'student') {
-                $student = Student::where('enrollment_application_id', $application->id)
-                    ->lockForUpdate()
-                    ->first();
                 if (! $student) {
                     $student = Student::create([
                         'enrollment_application_id' => $application->id,
@@ -89,11 +106,16 @@ class UserController extends Controller
                         'year_level' => $application->year_level,
                         'section' => $validated['section'] ?? 'A',
                         'status' => $application->student_status,
+                        'session' => $application->session,
                     ]);
                 }
                 $student->assignSchoolId();
-                $student->update(['user_id' => $user->id, 'section' => $validated['section'] ?? $student->section]);
-                $student->subjects()->sync($application->requested_subjects ?? []);
+                $student->update([
+                    'user_id' => $user->id,
+                    'section' => $validated['section'] ?? $student->section,
+                    'session' => $application->session ?? $student->session,
+                ]);
+                $student->subjects()->syncWithoutDetaching($application->requested_subjects ?? []);
                 $application->update(['account_issued' => true, 'user_id' => $user->id]);
             }
 
@@ -106,8 +128,9 @@ class UserController extends Controller
     public function update(Request $request, User $user)
     {
         $validated = $request->validate([
-            'name' => ['sometimes', 'required', 'string', 'min:3', 'max:255'],
+            'first_name' => ['sometimes', 'required', 'string', 'min:2', 'max:255'],
             'middle_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'last_name' => ['sometimes', 'required', 'string', 'min:2', 'max:255'],
             'email' => ['sometimes', 'required', 'email', 'max:255', Rule::unique('users')->ignore($user->id)],
             'role' => ['sometimes', 'required', 'exists:roles,name'],
             'active' => ['sometimes', 'boolean'],
@@ -129,11 +152,14 @@ class UserController extends Controller
             }
             $user->role()->associate($newRole);
         }
-        foreach (['name', 'middle_name', 'email', 'phone'] as $field) {
+        foreach (['first_name', 'middle_name', 'last_name', 'email', 'phone'] as $field) {
             if (array_key_exists($field, $validated)) {
                 $user->{$field} = $field === 'email' ? strtolower(trim($validated[$field]))
                     : ($validated[$field] === null ? null : trim($validated[$field]));
             }
+        }
+        if (array_key_exists('first_name', $validated) || array_key_exists('last_name', $validated)) {
+            $user->name = $this->fullName($user->first_name, $user->middle_name, $user->last_name);
         }
         if (array_key_exists('active', $validated)) {
             $user->is_active = $validated['active'];
@@ -215,13 +241,44 @@ class UserController extends Controller
 
     private function present(User $user): array
     {
+        $name = $this->fullName($user->first_name, $user->middle_name, $user->last_name)
+            ?: $user->name;
+
         return [
-            'id' => $user->id, 'name' => $user->name, 'middle_name' => $user->middle_name, 'email' => $user->email,
+            'id' => $user->id, 'name' => $name, 'first_name' => $user->first_name,
+            'middle_name' => $user->middle_name, 'last_name' => $user->last_name, 'email' => $user->email,
             'role' => $user->role?->name, 'active' => $user->is_active,
             'phone' => $user->phone ?? '', 'student_id' => $user->student?->id,
             'school_id' => $user->student?->school_id,
             'program' => $user->student?->program, 'year_level' => $user->student?->year_level,
             'avatar' => $user->avatar_path ? asset('storage/'.$user->avatar_path) : null,
         ];
+    }
+
+    private function fillNameFieldsFromApplication(Request $request): void
+    {
+        if ($request->has('first_name') && $request->has('last_name')) {
+            return;
+        }
+
+        $applicationRef = $request->input('application_ref');
+        $application = is_string($applicationRef) && trim($applicationRef) !== ''
+            ? EnrollmentApplication::where('reference', $applicationRef)->first()
+            : null;
+        if ($application) {
+            $request->merge([
+                'first_name' => $application->first_name,
+                'middle_name' => $application->middle_name,
+                'last_name' => $application->last_name,
+            ]);
+        }
+    }
+
+    private function fullName(?string $first, ?string $middle, ?string $last): string
+    {
+        return implode(' ', array_filter(
+            array_map(fn (?string $part): string => trim($part ?? ''), [$first, $middle, $last]),
+            fn (string $part): bool => $part !== ''
+        ));
     }
 }

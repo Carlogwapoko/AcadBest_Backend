@@ -24,10 +24,10 @@ class DatabaseSeeder extends Seeder
 
         $password = (string) env('DEMO_PASSWORD', 'AcadBest-Demo-2026!');
         $accounts = [
-            ['name' => 'Maria Santos', 'email' => 'student@aces.edu.ph', 'phone' => '0917 555 0101', 'role' => 'student'],
-            ['name' => 'Prof. Anfred Albit', 'email' => 'faculty@aces.edu.ph', 'phone' => '0917 555 0202', 'role' => 'faculty'],
-            ['name' => 'Liza Ramos', 'email' => 'registrar@aces.edu.ph', 'phone' => '0917 555 0303', 'role' => 'registrar'],
-            ['name' => 'System Admin', 'email' => 'admin@aces.edu.ph', 'phone' => '0917 555 0404', 'role' => 'admin'],
+            ['first_name' => 'Maria', 'last_name' => 'Santos', 'name' => 'Maria Santos', 'email' => 'student@aces.edu.ph', 'phone' => '0917 555 0101', 'role' => 'student'],
+            ['first_name' => 'Prof. Anfred', 'last_name' => 'Albit', 'name' => 'Prof. Anfred Albit', 'email' => 'faculty@aces.edu.ph', 'phone' => '0917 555 0202', 'role' => 'faculty'],
+            ['first_name' => 'Liza', 'last_name' => 'Ramos', 'name' => 'Liza Ramos', 'email' => 'registrar@aces.edu.ph', 'phone' => '0917 555 0303', 'role' => 'registrar'],
+            ['first_name' => 'System', 'last_name' => 'Admin', 'name' => 'System Admin', 'email' => 'admin@aces.edu.ph', 'phone' => '0917 555 0404', 'role' => 'admin'],
         ];
 
         foreach ($accounts as $account) {
@@ -35,6 +35,8 @@ class DatabaseSeeder extends Seeder
                 ['email' => $account['email']],
                 [
                     'name' => $account['name'],
+                    'first_name' => $account['first_name'],
+                    'last_name' => $account['last_name'],
                     'phone' => $account['phone'],
                     'password' => Hash::make($password),
                     'role_id' => $roles[$account['role']]->id,

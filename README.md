@@ -34,6 +34,8 @@ When Registrar Staff approves an application, the system creates the official st
 
 ## API
 
+Student account provisioning links the login to the existing student record so grades remain attached when credentials change. Subject offerings store a session, semester, and academic year; offerings without a recorded semester remain empty and display without a placeholder. Administrators configure the current academic school year in the standing-rules settings, and each enrollment application retains its submitted school year.
+
 User, enrollment, and service-request list endpoints are paginated (`25` records by default, capped at `50`) and accept `page` and `search` query parameters. Enrollment lists also accept `status`; service-request lists accept `status` and `type`. The Angular client requests additional pages as needed instead of downloading the complete lists.
 
 The Angular client connects to `http://localhost:8000/api`. Public routes allow login, online enrollment submission, and application tracking. Protected routes require `Authorization: Bearer <token>` and enforce role authorization server-side. `GET /api/portal` supplies role-scoped data; accounts, enrollments, courses, grades, announcements, requests, notifications, and settings use resource-specific routes in `routes/api.php`.

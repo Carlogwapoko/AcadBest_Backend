@@ -16,12 +16,12 @@ class Subject extends Model
 
     protected $fillable = [
         'code', 'name', 'units', 'days', 'meeting_time', 'start_time', 'end_time',
-        'room', 'program', 'year_level', 'grade_weights', 'component_weights', 'faculty_id',
+        'room', 'program', 'year_level', 'faculty_id', 'session', 'semester', 'academic_year',
     ];
 
     protected function casts(): array
     {
-        return ['grade_weights' => 'array', 'component_weights' => 'array', 'units' => 'integer'];
+        return ['units' => 'integer'];
     }
 
     public function faculty(): BelongsTo
