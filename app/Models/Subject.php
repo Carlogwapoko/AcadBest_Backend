@@ -16,7 +16,7 @@ class Subject extends Model
 
     protected $fillable = [
         'code', 'name', 'units', 'days', 'meeting_time', 'start_time', 'end_time',
-        'room', 'program', 'year_level', 'faculty_id', 'session', 'semester', 'academic_year',
+        'room', 'program', 'major', 'year_level', 'faculty_id', 'session', 'semester', 'academic_year',
     ];
 
     protected function casts(): array

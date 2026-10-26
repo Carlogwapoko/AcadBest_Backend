@@ -7,6 +7,7 @@ use App\Models\EnrollmentApplication;
 use App\Models\Student;
 use App\Models\Subject;
 use App\Services\AcademicYearService;
+use App\Support\NameParts;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -55,9 +56,15 @@ class EnrollmentController extends Controller
             'date_of_birth' => ['required', 'date', 'before:today'],
             'sex' => ['required', 'string', Rule::in(['Male', 'Female', 'Others'])],
             'address' => ['required', 'string', 'min:5'],
-            'program' => ['required', 'string', Rule::in(['BSTM', 'BSED', 'BEED', 'BSE', 'BSMA', 'BSHM', 'BSIT', 'BSBA'])],
-            'year_level' => ['required', 'integer', 'min:1', 'max:8'],
+            'program' => ['required', 'string', Rule::in(['BSTM', 'BSED', 'BEED', 'BSE', 'BSMA', 'BSHM', 'BSIT', 'BSBA',
+                'STEM', 'ABM', 'HUMSS', 'GAS', 'TVL'])],
+            'major' => ['nullable', 'string', 'required_if:program,BSBA,BSED,TVL', Rule::in([
+                'Financial Management', 'Human Resources Management', 'Filipino', 'English', 'Mathematics',
+                'ICT – Computer Servicing', 'Home Economics', 'Automotive Servicing', 'Electricity Servicing',
+            ])],
+            'year_level' => ['required', 'integer', 'min:1', 'max:12'],
             'session' => ['nullable', 'string', Rule::in(['Afternoon', 'Evening', 'Weekends'])],
+            'semester' => ['required', 'string', Rule::in(['1st Semester', '2nd Semester'])],
             'application_type' => ['required', 'string', 'max:50'],
             'previous_school' => ['required', 'string', 'min:3', 'max:255'],
             'guardian_name' => ['required', 'string', 'min:3', 'max:255'],
@@ -67,6 +74,11 @@ class EnrollmentController extends Controller
         if (! $academicYear->isValid($data['academic_year'])) {
             throw ValidationException::withMessages([
                 'academic_year' => ['Choose a valid academic year, such as 2026-2027.'],
+            ]);
+        }
+        if (isset($data['major']) && ! in_array($data['major'], $this->majorsFor($data['program']), true)) {
+            throw ValidationException::withMessages([
+                'major' => ['Choose a major offered by the selected program.'],
             ]);
         }
         $data['name'] = $this->fullName($data['first_name'], $data['middle_name'] ?? null, $data['last_name']);
@@ -93,14 +105,28 @@ class EnrollmentController extends Controller
         }
 
         return response()->json([
-            'ref' => $application->reference, 'name' => $application->name,
-            'first_name' => $application->first_name,
-            'last_name' => $application->last_name,
-            'middle_name' => $application->middle_name,
+            'ref' => $application->reference,
+            'name' => NameParts::displayName(
+                $application->name,
+                $application->first_name,
+                $application->middle_name,
+                $application->last_name
+            ),
+            ...array_map(
+                fn (string $part): ?string => $part !== '' ? $part : null,
+                NameParts::resolve(
+                    $application->name,
+                    $application->first_name,
+                    $application->middle_name,
+                    $application->last_name
+                )
+            ),
             'student_status' => $application->student_status,
             'email' => $application->email, 'prog' => $application->program,
             'yr' => $application->year_level, 'st' => $application->status,
             'academic_year' => $application->academic_year,
+            'semester' => $application->semester,
+            'major' => $application->major,
             'school_id' => $application->student?->school_id,
             'note' => $application->reviewer_note ?? '',
             'log' => collect($application->history)->map(fn ($item) => [$item['date'], $item['action']])->all(),
@@ -139,26 +165,48 @@ class EnrollmentController extends Controller
             $application = EnrollmentApplication::whereKey($enrollment->getKey())
                 ->lockForUpdate()
                 ->firstOrFail();
-            $student = Student::where('enrollment_application_id', $application->id)
-                ->lockForUpdate()
-                ->first();
+            $student = $application->student()->lockForUpdate()->first()
+                ?? Student::where('enrollment_application_id', $application->id)
+                    ->lockForUpdate()
+                    ->first();
 
             if ($data['status'] === 'Enrolled') {
+                if (! $student) {
+                    $email = strtolower(trim($application->email));
+                    $student = Student::query()
+                        ->whereHas('user', fn ($query) => $query->whereRaw('LOWER(email) = ?', [$email]))
+                        ->orWhereHas('enrollmentApplication', fn ($query) => $query->whereRaw('LOWER(email) = ?', [$email]))
+                        ->lockForUpdate()
+                        ->first();
+                }
                 $student ??= Student::create([
                     'enrollment_application_id' => $application->id,
                     'program' => $application->program,
+                    'major' => $application->major,
                     'year_level' => $application->year_level,
                     'section' => 'A',
                     'status' => 'New Student',
                     'session' => $application->session,
+                    'semester' => $application->semester,
                 ]);
-                if ($student->session === null) {
-                    $student->update(['session' => $application->session]);
-                }
                 $student->assignSchoolId();
+                $student->update([
+                    'program' => $application->program,
+                    'major' => $application->major,
+                    'year_level' => $application->year_level,
+                    'session' => $application->session,
+                    'semester' => $application->semester,
+                ]);
+                $application->update([
+                    'student_id' => $student->id,
+                    'user_id' => $student->user_id ?? $application->user_id,
+                    'account_issued' => $student->user_id ? true : $application->account_issued,
+                ]);
             } elseif (! $application->account_issued) {
-                $student?->delete();
-                $student = null;
+                if ($student && $student->enrollment_application_id === $application->id && ! $student->user_id) {
+                    $student->delete();
+                    $student = null;
+                }
             }
 
             $history = $application->history ?? [];
@@ -170,7 +218,9 @@ class EnrollmentController extends Controller
             }];
             $application->update([
                 'status' => $data['status'],
-                'student_status' => $data['status'] === 'Enrolled' ? 'New Student' : 'Applicant',
+                'student_status' => $data['status'] === 'Enrolled'
+                    ? ($student?->status ?? 'New Student')
+                    : 'Applicant',
                 'reviewer_note' => $data['note'] ?? $application->reviewer_note,
                 'history' => $history,
             ]);
@@ -189,16 +239,30 @@ class EnrollmentController extends Controller
 
     private function present(EnrollmentApplication $application): array
     {
+        $parts = NameParts::resolve(
+            $application->name,
+            $application->first_name,
+            $application->middle_name,
+            $application->last_name
+        );
+
         return [
-            'ref' => $application->reference, 'name' => $application->name,
-            'first_name' => $application->first_name,
-            'middle_name' => $application->middle_name,
-            'last_name' => $application->last_name,
+            'ref' => $application->reference,
+            'name' => NameParts::displayName(
+                $application->name,
+                $application->first_name,
+                $application->middle_name,
+                $application->last_name
+            ),
+            'first_name' => $parts['first_name'] ?: null,
+            'middle_name' => $parts['middle_name'] ?: null,
+            'last_name' => $parts['last_name'] ?: null,
             'email' => $application->email,
             'phone' => $application->phone, 'dob' => $application->date_of_birth->format('Y-m-d'),
             'student_status' => $application->student_status,
             'sex' => $application->sex, 'addr' => $application->address, 'prog' => $application->program,
             'yr' => $application->year_level, 'session' => $application->session,
+            'major' => $application->major, 'semester' => $application->semester,
             'academic_year' => $application->academic_year,
             'type' => $application->application_type,
             'school' => $application->previous_school, 'gname' => $application->guardian_name,
@@ -216,5 +280,20 @@ class EnrollmentController extends Controller
             array_map(fn (?string $part): string => trim($part ?? ''), [$first, $middle, $last]),
             fn (string $part): bool => $part !== ''
         ));
+    }
+
+    private function majorsFor(string $program): array
+    {
+        return match ($program) {
+            'BSBA' => ['Financial Management', 'Human Resources Management'],
+            'BSED' => ['Filipino', 'English', 'Mathematics'],
+            'TVL' => [
+                'ICT – Computer Servicing',
+                'Home Economics',
+                'Automotive Servicing',
+                'Electricity Servicing',
+            ],
+            default => [],
+        };
     }
 }

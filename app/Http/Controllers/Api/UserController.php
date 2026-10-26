@@ -7,6 +7,7 @@ use App\Models\EnrollmentApplication;
 use App\Models\Role;
 use App\Models\Student;
 use App\Models\User;
+use App\Support\NameParts;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -45,7 +46,7 @@ class UserController extends Controller
             'password' => ['required', 'string', 'min:8'],
             'phone' => ['nullable', 'string', 'max:30'],
             'program' => ['nullable', 'string', 'max:20'],
-            'year_level' => ['nullable', 'integer', 'min:1', 'max:8'],
+            'year_level' => ['nullable', 'integer', 'min:1', 'max:12'],
             'section' => ['nullable', 'string', 'max:10'],
             'application_ref' => ['nullable', 'exists:enrollment_applications,reference'],
         ]);
@@ -70,26 +71,39 @@ class UserController extends Controller
                     'application_ref' => ['This approved application already has an account or is no longer eligible.'],
                 ]);
             }
-            if ($application && (! $application->first_name || ! $application->last_name)) {
+            $nameParts = $application
+                ? NameParts::resolve(
+                    $application->name,
+                    $application->first_name,
+                    $application->middle_name,
+                    $application->last_name
+                )
+                : [
+                    'first_name' => $validated['first_name'],
+                    'middle_name' => $validated['middle_name'] ?? '',
+                    'last_name' => $validated['last_name'],
+                ];
+            if ($application && ($nameParts['first_name'] === '' || $nameParts['last_name'] === '')) {
                 throw ValidationException::withMessages([
                     'application_ref' => ['The applicant first and last names are unavailable, so an account cannot be created.'],
                 ]);
             }
             $student = $application
-                ? Student::where('enrollment_application_id', $application->id)->lockForUpdate()->first()
+                ? ($application->student()->lockForUpdate()->first()
+                    ?? Student::where('enrollment_application_id', $application->id)->lockForUpdate()->first())
                 : null;
             if ($student?->user_id) {
                 throw ValidationException::withMessages([
                     'application_ref' => ['This student record is already linked to an account. Update that account instead.'],
                 ]);
             }
-            $firstName = $application ? $application->first_name : $validated['first_name'];
-            $middleName = $application ? $application->middle_name : ($validated['middle_name'] ?? null);
-            $lastName = $application ? $application->last_name : $validated['last_name'];
+            $firstName = $nameParts['first_name'];
+            $middleName = $nameParts['middle_name'];
+            $lastName = $nameParts['last_name'];
             $user = User::create([
-                'name' => $this->fullName($firstName, $middleName, $lastName),
+                'name' => NameParts::fullName($firstName, $middleName, $lastName),
                 'first_name' => trim($firstName),
-                'middle_name' => $middleName === null ? null : trim($middleName),
+                'middle_name' => trim($middleName) === '' ? null : trim($middleName),
                 'last_name' => trim($lastName),
                 'email' => strtolower(trim($validated['email'])),
                 'password' => Hash::make($validated['password']),
@@ -103,10 +117,12 @@ class UserController extends Controller
                     $student = Student::create([
                         'enrollment_application_id' => $application->id,
                         'program' => $application->program,
+                        'major' => $application->major,
                         'year_level' => $application->year_level,
                         'section' => $validated['section'] ?? 'A',
                         'status' => $application->student_status,
                         'session' => $application->session,
+                        'semester' => $application->semester,
                     ]);
                 }
                 $student->assignSchoolId();
@@ -117,6 +133,7 @@ class UserController extends Controller
                 ]);
                 $student->subjects()->syncWithoutDetaching($application->requested_subjects ?? []);
                 $application->update(['account_issued' => true, 'user_id' => $user->id]);
+                $application->update(['student_id' => $student->id]);
             }
 
             return $user->load(['role', 'student']);
@@ -138,7 +155,7 @@ class UserController extends Controller
             'phone' => ['sometimes', 'nullable', 'string', 'max:30'],
             'avatar_data' => ['sometimes', 'nullable', 'string', 'max:4194304'],
             'program' => ['sometimes', 'required', 'string', 'max:20'],
-            'year_level' => ['sometimes', 'required', 'integer', 'min:1', 'max:8'],
+            'year_level' => ['sometimes', 'required', 'integer', 'min:1', 'max:12'],
         ]);
 
         if (isset($validated['role'])) {
@@ -158,8 +175,12 @@ class UserController extends Controller
                     : ($validated[$field] === null ? null : trim($validated[$field]));
             }
         }
-        if (array_key_exists('first_name', $validated) || array_key_exists('last_name', $validated)) {
-            $user->name = $this->fullName($user->first_name, $user->middle_name, $user->last_name);
+        if (
+            array_key_exists('first_name', $validated)
+            || array_key_exists('middle_name', $validated)
+            || array_key_exists('last_name', $validated)
+        ) {
+            $user->name = NameParts::fullName($user->first_name, $user->middle_name, $user->last_name);
         }
         if (array_key_exists('active', $validated)) {
             $user->is_active = $validated['active'];
@@ -241,16 +262,26 @@ class UserController extends Controller
 
     private function present(User $user): array
     {
-        $name = $this->fullName($user->first_name, $user->middle_name, $user->last_name)
-            ?: $user->name;
+        $parts = NameParts::resolve($user->name, $user->first_name, $user->middle_name, $user->last_name);
 
         return [
-            'id' => $user->id, 'name' => $name, 'first_name' => $user->first_name,
-            'middle_name' => $user->middle_name, 'last_name' => $user->last_name, 'email' => $user->email,
+            'id' => $user->id,
+            'name' => NameParts::displayName(
+                $user->name,
+                $parts['first_name'],
+                $parts['middle_name'],
+                $parts['last_name'],
+                true
+            ),
+            'first_name' => $parts['first_name'] ?: null,
+            'middle_name' => $parts['middle_name'] ?: null,
+            'last_name' => $parts['last_name'] ?: null,
+            'email' => $user->email,
             'role' => $user->role?->name, 'active' => $user->is_active,
             'phone' => $user->phone ?? '', 'student_id' => $user->student?->id,
             'school_id' => $user->student?->school_id,
-            'program' => $user->student?->program, 'year_level' => $user->student?->year_level,
+            'program' => $user->student?->program, 'major' => $user->student?->major,
+            'semester' => $user->student?->semester, 'year_level' => $user->student?->year_level,
             'avatar' => $user->avatar_path ? asset('storage/'.$user->avatar_path) : null,
         ];
     }
@@ -266,19 +297,17 @@ class UserController extends Controller
             ? EnrollmentApplication::where('reference', $applicationRef)->first()
             : null;
         if ($application) {
+            $parts = NameParts::resolve(
+                $application->name,
+                $application->first_name,
+                $application->middle_name,
+                $application->last_name
+            );
             $request->merge([
-                'first_name' => $application->first_name,
-                'middle_name' => $application->middle_name,
-                'last_name' => $application->last_name,
+                'first_name' => $parts['first_name'],
+                'middle_name' => $parts['middle_name'] !== '' ? $parts['middle_name'] : null,
+                'last_name' => $parts['last_name'],
             ]);
         }
-    }
-
-    private function fullName(?string $first, ?string $middle, ?string $last): string
-    {
-        return implode(' ', array_filter(
-            array_map(fn (?string $part): string => trim($part ?? ''), [$first, $middle, $last]),
-            fn (string $part): bool => $part !== ''
-        ));
     }
 }

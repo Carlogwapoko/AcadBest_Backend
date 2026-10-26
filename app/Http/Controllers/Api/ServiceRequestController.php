@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\ServiceRequest;
+use App\Support\NameParts;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
@@ -32,14 +33,36 @@ class ServiceRequestController extends Controller
             ->latest()
             ->paginate($perPage);
 
-        return response()->json($requests->through(fn (ServiceRequest $serviceRequest) => [
-            'id' => $serviceRequest->reference, 'sid' => $serviceRequest->student_id,
-            'by' => $serviceRequest->student?->user?->name ?? 'Student',
-            'type' => $serviceRequest->type, 'purpose' => $serviceRequest->purpose,
-            'copies' => $serviceRequest->copies, 'need' => $serviceRequest->date_needed->format('Y-m-d'),
-            'rem' => $serviceRequest->remarks ?? '', 'st' => $serviceRequest->status,
-            'log' => collect($serviceRequest->history)->map(fn ($item) => [$item['date'], $item['action']])->all(),
-        ]));
+        return response()->json($requests->through(function (ServiceRequest $serviceRequest): array {
+            $user = $serviceRequest->student?->user;
+            $parts = $user
+                ? NameParts::resolve($user->name, $user->first_name, $user->middle_name, $user->last_name)
+                : ['first_name' => '', 'middle_name' => '', 'last_name' => ''];
+
+            return [
+                'id' => $serviceRequest->reference,
+                'sid' => $serviceRequest->student_id,
+                'by' => $user
+                    ? NameParts::displayName(
+                        $user->name,
+                        $parts['first_name'],
+                        $parts['middle_name'],
+                        $parts['last_name'],
+                        true
+                    )
+                    : 'Student',
+                'first_name' => $parts['first_name'] ?: null,
+                'middle_name' => $parts['middle_name'] ?: null,
+                'last_name' => $parts['last_name'] ?: null,
+                'type' => $serviceRequest->type,
+                'purpose' => $serviceRequest->purpose,
+                'copies' => $serviceRequest->copies,
+                'need' => $serviceRequest->date_needed->format('Y-m-d'),
+                'rem' => $serviceRequest->remarks ?? '',
+                'st' => $serviceRequest->status,
+                'log' => collect($serviceRequest->history)->map(fn ($item) => [$item['date'], $item['action']])->all(),
+            ];
+        }));
     }
 
     public function store(Request $request)
@@ -87,25 +110,25 @@ class ServiceRequestController extends Controller
             : $data['status'];
         $history[] = ['date' => now()->format('M d'), 'at' => now()->toIso8601String(), 'action' => $action];
         $serviceRequest->update([
-    'status' => $data['status'], 'history' => $history,
-    'remarks' => $data['remarks'] ?? $serviceRequest->remarks,
-    'completed_at' => in_array($data['status'], ['Completed', 'Rejected'], true) ? now() : null,
-]);
+            'status' => $data['status'], 'history' => $history,
+            'remarks' => $data['remarks'] ?? $serviceRequest->remarks,
+            'completed_at' => in_array($data['status'], ['Completed', 'Rejected'], true) ? now() : null,
+        ]);
 
         return response()->noContent();
     }
 
     public function metrics()
-{
-    $done = ServiceRequest::where('status', 'Completed')->whereNotNull('completed_at')->get();
-    $minutes = $done->map(fn ($r) => $r->created_at->diffInMinutes($r->completed_at));
+    {
+        $done = ServiceRequest::where('status', 'Completed')->whereNotNull('completed_at')->get();
+        $minutes = $done->map(fn ($r) => $r->created_at->diffInMinutes($r->completed_at));
 
-    return response()->json([
-        'completed' => $done->count(),
-        'avg_processing_hours' => $minutes->isEmpty() ? null : round($minutes->avg() / 60, 1),
-        'by_type' => $done->groupBy('type')->map(fn ($g) => round(
-            $g->avg(fn ($r) => $r->created_at->diffInMinutes($r->completed_at)) / 60, 1
-        )),
-    ]);
-}
+        return response()->json([
+            'completed' => $done->count(),
+            'avg_processing_hours' => $minutes->isEmpty() ? null : round($minutes->avg() / 60, 1),
+            'by_type' => $done->groupBy('type')->map(fn ($g) => round(
+                $g->avg(fn ($r) => $r->created_at->diffInMinutes($r->completed_at)) / 60, 1
+            )),
+        ]);
+    }
 }

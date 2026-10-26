@@ -10,6 +10,7 @@ use App\Models\Student;
 use App\Models\Subject;
 use App\Models\User;
 use App\Services\StandingService;
+use App\Support\NameParts;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -24,11 +25,14 @@ class PortalDataController extends Controller
 
         $subjectQuery = Subject::query();
         $studentQuery = Student::query()
-            ->select(['id', 'user_id', 'school_id', 'enrollment_application_id', 'status', 'program', 'year_level', 'section', 'session'])
+            ->select(['id', 'user_id', 'school_id', 'enrollment_application_id', 'status', 'program', 'major',
+                'year_level', 'section', 'session', 'semester'])
             ->with([
                 'user:id,name,first_name,middle_name,last_name',
                 'enrollmentApplication:id,academic_year',
-                'subjects:code,name,units,days,meeting_time,start_time,end_time,room,program,year_level,faculty_id,session,semester,academic_year',
+                'enrollmentApplications' => fn ($query) => $query->where('status', 'Enrolled')
+                    ->latest('id')->select(['id', 'student_id', 'status', 'academic_year', 'semester', 'program', 'major', 'session']),
+                'subjects:code,name,units,days,meeting_time,start_time,end_time,room,program,major,year_level,faculty_id,session,semester,academic_year',
             ]);
 
         if ($role === 'student') {
@@ -52,6 +56,9 @@ class PortalDataController extends Controller
             );
         } elseif (! in_array($role, ['registrar', 'admin'], true)) {
             $studentQuery->whereKey(0);
+        }
+        if (in_array($role, ['registrar', 'admin', 'faculty'], true)) {
+            $studentQuery->whereHas('enrollmentApplications', fn ($query) => $query->where('status', 'Enrolled'));
         }
 
         $students = $studentQuery->get();
@@ -113,7 +120,7 @@ class PortalDataController extends Controller
             ? collect()
             : Subject::whereIn('code', $gradeRows->pluck('subject_code')->unique())
                 ->get(['code', 'name', 'units', 'days', 'meeting_time', 'start_time', 'end_time', 'room',
-                    'program', 'year_level', 'faculty_id', 'session', 'semester', 'academic_year'])
+                    'program', 'major', 'year_level', 'faculty_id', 'session', 'semester', 'academic_year'])
                 ->keyBy('code');
         if ($role === 'student') {
             $subjects = $subjects->concat($gradedSubjects->values())->unique('code');
@@ -136,12 +143,17 @@ class PortalDataController extends Controller
                 $recordSubjects = $record->subjects->concat(
                     $gradedSubjects->only($own->pluck('subject_code')->unique()->all())->values()
                 )->unique('code');
+                $enrollment = $record->enrollmentApplications->first();
 
                 $summary = $standing->evaluate(
                     $record->subjects,
                     $own->groupBy('subject_code')
                 );
 
+                $user = $record->user;
+                $nameParts = $user
+                    ? NameParts::resolve($user->name, $user->first_name, $user->middle_name, $user->last_name)
+                    : ['first_name' => '', 'middle_name' => '', 'last_name' => ''];
                 $grades = [];
                 foreach ($recordSubjects as $subject) {
                     $grades[$subject->code] = collect([
@@ -156,16 +168,24 @@ class PortalDataController extends Controller
 
                 return [
                     'id' => $record->id,
-                    'name' => $record->user
-                        ? ($this->fullName($record->user->first_name, $record->user->middle_name, $record->user->last_name)
-                            ?: $record->user->name)
+                    'name' => $user
+                        ? NameParts::displayName(
+                            $user->name,
+                            $nameParts['first_name'],
+                            $nameParts['middle_name'],
+                            $nameParts['last_name'],
+                            true
+                        )
                         : 'Unlinked student',
-                    'first_name' => $record->user?->first_name,
-                    'middle_name' => $record->user?->middle_name,
-                    'last_name' => $record->user?->last_name,
+                    'first_name' => $nameParts['first_name'] ?: null,
+                    'middle_name' => $nameParts['middle_name'] ?: null,
+                    'last_name' => $nameParts['last_name'] ?: null,
                     'school_id' => $record->school_id,
-                    'session' => $record->session,
-                    'academic_year' => $record->enrollmentApplication?->academic_year,
+                    'session' => $enrollment?->session ?? $record->session,
+                    'major' => $enrollment?->major ?? $record->major,
+                    'semester' => $enrollment?->semester ?? $record->semester,
+                    'academic_year' => $enrollment?->academic_year ?? $record->enrollmentApplication?->academic_year,
+                    'enrollment_status' => $enrollment?->status,
                     'subject_codes' => $record->subjects->pluck('code')->values(),
                     'status' => $record->status,
                     'prog' => $record->program,
@@ -212,22 +232,31 @@ class PortalDataController extends Controller
             'disabled' => $disabled,
 
             'users' => $facultyUsers->map(
-                fn (User $record) => [
-                    'id' => $record->id,
-                    'name' => $this->fullName($record->first_name, $record->middle_name, $record->last_name)
-                        ?: $record->name,
-                    'first_name' => $record->first_name,
-                    'middle_name' => $record->middle_name,
-                    'last_name' => $record->last_name,
-                    'email' => '',
-                    'role' => $record->role?->name,
-                    'act' => $record->is_active,
-                    'phone' => $record->phone ?? '',
-                    'sid' => null,
-                    'avatar' => $record->avatar_path
-                        ? asset('storage/'.$record->avatar_path)
-                        : null,
-                ]
+                function (User $record): array {
+                    $parts = NameParts::resolve($record->name, $record->first_name, $record->middle_name, $record->last_name);
+
+                    return [
+                        'id' => $record->id,
+                        'name' => NameParts::displayName(
+                            $record->name,
+                            $parts['first_name'],
+                            $parts['middle_name'],
+                            $parts['last_name'],
+                            true
+                        ),
+                        'first_name' => $parts['first_name'] ?: null,
+                        'middle_name' => $parts['middle_name'] ?: null,
+                        'last_name' => $parts['last_name'] ?: null,
+                        'email' => $record->email,
+                        'role' => $record->role?->name,
+                        'act' => $record->is_active,
+                        'phone' => $record->phone ?? '',
+                        'sid' => null,
+                        'avatar' => $record->avatar_path
+                            ? asset('storage/'.$record->avatar_path)
+                            : null,
+                    ];
+                }
             ),
 
             'subjects' => $subjects->mapWithKeys(
@@ -248,6 +277,7 @@ class PortalDataController extends Controller
                         'end' => $subject->end_time,
                         'r' => $subject->room,
                         'p' => $subject->program,
+                        'major' => $subject->major,
                         'session' => $subject->session,
                         'semester' => $subject->semester,
                         'academic_year' => $subject->academic_year,
@@ -331,13 +361,5 @@ class PortalDataController extends Controller
                 'Copy of Grades',
             ],
         ]);
-    }
-
-    private function fullName(?string $first, ?string $middle, ?string $last): string
-    {
-        return implode(' ', array_filter(
-            array_map(fn (?string $part): string => trim($part ?? ''), [$first, $middle, $last]),
-            fn (string $part): bool => $part !== ''
-        ));
     }
 }

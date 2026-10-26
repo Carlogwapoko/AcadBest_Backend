@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\ApiToken;
 use App\Models\User;
+use App\Support\NameParts;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
@@ -51,19 +52,20 @@ class AuthController extends Controller
 
     private function present(User $user): array
     {
-        $name = implode(' ', array_filter(
-            array_map(fn (?string $part): string => trim($part ?? ''), [
-                $user->first_name, $user->middle_name, $user->last_name,
-            ]),
-            fn (?string $part): bool => $part !== ''
-        )) ?: $user->name;
+        $parts = NameParts::resolve($user->name, $user->first_name, $user->middle_name, $user->last_name);
 
         return [
             'id' => $user->id,
-            'name' => $name,
-            'first_name' => $user->first_name,
-            'middle_name' => $user->middle_name,
-            'last_name' => $user->last_name,
+            'name' => NameParts::displayName(
+                $user->name,
+                $parts['first_name'],
+                $parts['middle_name'],
+                $parts['last_name'],
+                true
+            ),
+            'first_name' => $parts['first_name'] ?: null,
+            'middle_name' => $parts['middle_name'] ?: null,
+            'last_name' => $parts['last_name'] ?: null,
             'email' => $user->email,
             'role' => $user->role?->name,
             'role_key' => $user->role?->slug,
@@ -71,6 +73,10 @@ class AuthController extends Controller
             'active' => $user->is_active,
             'student_id' => $user->student?->id,
             'school_id' => $user->student?->school_id,
+            'program' => $user->student?->program,
+            'major' => $user->student?->major,
+            'semester' => $user->student?->semester,
+            'year_level' => $user->student?->year_level,
             'avatar' => $user->avatar_path ? asset('storage/'.$user->avatar_path) : null,
         ];
     }

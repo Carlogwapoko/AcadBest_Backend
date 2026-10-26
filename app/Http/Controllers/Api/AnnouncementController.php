@@ -22,8 +22,9 @@ class AnnouncementController extends Controller
             'priority' => ['required', 'in:Normal,High'],
             'publish_date' => ['required', 'date', 'after_or_equal:today'],
             'valid_until' => ['nullable', 'date', 'after_or_equal:publish_date'],
-            'program' => ['required', Rule::in(['All', 'BSIT', 'BSBA'])],
-            'year_level' => ['required', Rule::in(['All', '1', '2', '3', '4'])],
+            'program' => ['required', Rule::in(['All', 'BSTM', 'BSED', 'BEED', 'BSE', 'BSMA', 'BSHM', 'BSIT', 'BSBA',
+                'STEM', 'ABM', 'HUMSS', 'GAS', 'TVL'])],
+            'year_level' => ['required', Rule::in(['All', '1', '2', '3', '4', '11', '12'])],
             'section' => ['required', Rule::in(['All', 'A', 'B'])],
         ]);
         $emails = [];

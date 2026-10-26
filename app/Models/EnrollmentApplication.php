@@ -4,7 +4,6 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class EnrollmentApplication extends Model
 {
@@ -15,9 +14,9 @@ class EnrollmentApplication extends Model
 
     protected $fillable = [
         'reference', 'name', 'first_name', 'middle_name', 'last_name', 'email', 'phone', 'date_of_birth', 'sex', 'address',
-        'program', 'year_level', 'session', 'academic_year', 'application_type', 'previous_school',
+        'program', 'major', 'year_level', 'session', 'semester', 'academic_year', 'application_type', 'previous_school',
         'guardian_name', 'guardian_phone', 'status', 'student_status', 'reviewer_note',
-        'account_issued', 'requested_subjects', 'history', 'user_id',
+        'account_issued', 'requested_subjects', 'history', 'user_id', 'student_id',
     ];
 
     protected function casts(): array
@@ -35,8 +34,8 @@ class EnrollmentApplication extends Model
         return $this->belongsTo(User::class);
     }
 
-    public function student(): HasOne
+    public function student(): BelongsTo
     {
-        return $this->hasOne(Student::class);
+        return $this->belongsTo(Student::class);
     }
 }

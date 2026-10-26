@@ -57,9 +57,6 @@ class SubjectController extends Controller
         }
         $data = $request->validate(['codes' => ['present', 'array'], 'codes.*' => ['string', 'distinct', 'exists:subjects,code']]);
         $subjects = Subject::whereIn('code', $data['codes'])->get();
-        if ($subjects->sum('units') > 24) {
-            throw ValidationException::withMessages(['codes' => ['Faculty load cannot exceed 24 units.']]);
-        }
         $this->assertNoScheduleClashes($subjects);
         Subject::where('faculty_id', $user->id)->update(['faculty_id' => null]);
         Subject::whereIn('code', $data['codes'])->update(['faculty_id' => $user->id]);
@@ -71,42 +68,88 @@ class SubjectController extends Controller
     {
         $data = $request->validate(['codes' => ['required', 'array', 'min:1'], 'codes.*' => ['string', 'distinct', 'exists:subjects,code']]);
         $subjects = Subject::whereIn('code', $data['codes'])->get();
-        if ($student->session && $subjects->contains(
-            fn (Subject $subject) => $subject->session !== 'All' && $subject->session !== $student->session
-        )) {
+        $application = $student->enrollmentApplications()
+            ->where('status', 'Enrolled')
+            ->latest('id')
+            ->first()
+            ?? $student->enrollmentApplication()->where('status', 'Enrolled')->first();
+        if (! $application) {
             throw ValidationException::withMessages([
-                'codes' => ['A student can only be assigned subjects offered in their selected session.'],
+                'student' => ['Subject loads can only be assigned to students with an enrolled application.'],
+            ]);
+        }
+        if ($subjects->contains(fn (Subject $subject) => ! $this->matchesEnrollment($subject, $application))) {
+            throw ValidationException::withMessages([
+                'codes' => ['The subject load must match the student’s program, major, session, semester, and academic year.'],
             ]);
         }
         if ($subjects->sum('units') > 27) {
             throw ValidationException::withMessages(['codes' => ['Student course load cannot exceed 27 units.']]);
         }
         $this->assertNoScheduleClashes($subjects);
-        $student->subjects()->sync($data['codes']);
+        $preservedCodes = $student->subjects->filter(
+            fn (Subject $subject) => ! $this->matchesEnrollment($subject, $application)
+        )->pluck('code')->all();
+        $student->subjects()->sync(array_values(array_unique([...$data['codes'], ...$preservedCodes])));
 
-        return response()->noContent();
+        return response()->json(['codes' => $student->subjects()->pluck('subjects.code')->all()]);
+    }
+
+    private function matchesEnrollment(Subject $subject, EnrollmentApplication $application): bool
+    {
+        return ($subject->program === 'All' || $subject->program === $application->program)
+            && ($subject->major === null || $subject->major === $application->major)
+            && (! $application->session || $subject->session === 'All' || $subject->session === $application->session)
+            && ($subject->semester === null || $subject->semester === $application->semester)
+            && ($subject->academic_year === null || $subject->academic_year === $application->academic_year)
+            && ($subject->year_level === 'All' || (string) $subject->year_level === (string) $application->year_level);
     }
 
     private function validateSubject(Request $request, ?Subject $subject = null): array
     {
         $required = $subject ? ['sometimes', 'required'] : ['required'];
 
-        return $request->validate([
+        $data = $request->validate([
             'code' => [...$required, 'string', 'regex:/^[A-Z]{2,4}\d{3}$/', 'max:10',
                 Rule::unique('subjects', 'code')->ignore($subject?->code, 'code')],
             'name' => [...$required, 'string', 'min:3', 'max:255'],
             'units' => [...$required, 'integer', 'min:1', 'max:6'],
-            'days' => [...$required, 'string', 'max:50'],
+            'days' => [...$required, Rule::in(['Mon/Wed', 'Tue/Thu', 'Fri', 'Sat', 'Sun'])],
             'start_time' => [...$required, 'date_format:H:i'],
             'end_time' => [...$required, 'date_format:H:i'],
             'room' => [...$required, 'string', 'max:50'],
-            'program' => [...$required, 'string', 'max:20'],
+            'program' => [...$required, 'string', Rule::in([
+                'All', 'BSIT', 'BSBA', 'BSTM', 'BSED', 'BEED', 'BSMA', 'BSHM', 'TVL',
+                'BSE', 'STEM', 'ABM', 'HUMSS', 'GAS',
+            ])],
+            'major' => ['sometimes', 'nullable', 'string', Rule::in([
+                'Financial Management', 'Human Resources Management', 'Filipino', 'English', 'Mathematics',
+                'ICT – Computer Servicing', 'Home Economics', 'Automotive Servicing', 'Electricity Servicing',
+            ])],
             'year_level' => [...$required, 'string', 'max:10'],
             'session' => ['sometimes', 'required', Rule::in(['All', 'Afternoon', 'Evening', 'Weekends'])],
             'semester' => ['sometimes', 'nullable', Rule::in(['1st Semester', '2nd Semester', 'Summer'])],
             'academic_year' => ['nullable', 'string', 'regex:/^\d{4}-\d{4}$/', 'max:9'],
             'faculty_id' => ['nullable', 'exists:users,id'],
         ]);
+        $program = $request->input('program', $subject?->program);
+        $major = $request->input('major', $subject?->major);
+        $majors = match ($program) {
+            'BSBA' => ['Financial Management', 'Human Resources Management'],
+            'BSED' => ['Filipino', 'English', 'Mathematics'],
+            'TVL' => ['ICT – Computer Servicing', 'Home Economics', 'Automotive Servicing', 'Electricity Servicing'],
+            default => [],
+        };
+        if ((($subject === null || $request->has('major')
+                || ($request->has('program') && $request->input('program') !== $subject?->program))
+                && $majors !== [] && ! $major)
+            || ($major !== null && ! in_array($major, $majors, true))) {
+            throw ValidationException::withMessages([
+                'major' => ['Choose a major offered by the selected program.'],
+            ]);
+        }
+
+        return $data;
     }
 
     private function normalizeCode(Request $request): void
@@ -170,6 +213,7 @@ class SubjectController extends Controller
             'start_time' => $startTime, 'end_time' => $endTime,
             'meeting_time' => $startTime.'-'.$endTime, 'room' => $data['room'] ?? $subject?->room,
             'program' => $data['program'] ?? $subject?->program,
+            'major' => array_key_exists('major', $data) ? $data['major'] : $subject?->major,
             'year_level' => (string) ($data['year_level'] ?? $subject?->year_level),
             'session' => $data['session'] ?? $subject?->session ?? 'All',
             'semester' => array_key_exists('semester', $data) ? $data['semester'] : $subject?->semester,

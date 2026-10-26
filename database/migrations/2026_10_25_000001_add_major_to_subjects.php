@@ -8,15 +8,15 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('enrollment_applications', function (Blueprint $table) {
-            $table->boolean('name_parts_verified')->default(false);
+        Schema::table('subjects', function (Blueprint $table) {
+            $table->string('major')->nullable();
         });
     }
 
     public function down(): void
     {
-        Schema::table('enrollment_applications', function (Blueprint $table) {
-            $table->dropColumn('name_parts_verified');
+        Schema::table('subjects', function (Blueprint $table) {
+            $table->dropColumn('major');
         });
     }
 };
