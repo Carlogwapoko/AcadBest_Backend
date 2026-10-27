@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Mail\PortalNotice;
 use App\Models\EnrollmentApplication;
 use App\Models\Grade;
 use App\Models\Student;
@@ -10,6 +11,8 @@ use App\Models\User;
 use App\Services\StandingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -389,7 +392,7 @@ class AcadBestApiTest extends TestCase
             'code' => 'IT301', 'name' => 'Integrative Programming', 'units' => 3,
             'days' => 'Mon/Wed', 'start_time' => '08:00', 'end_time' => '09:30', 'room' => 'Lab 2',
             'program' => 'BSIT', 'year_level' => '1',
-            'session' => 'Weekends', 'semester' => $application->semester, 'academic_year' => $application->academic_year,
+            'semester' => $application->semester, 'academic_year' => $application->academic_year,
         ])->assertCreated();
         $this->withToken($registrarToken)->putJson('/api/faculty/'.$faculty->id.'/subjects', [
             'codes' => ['IT301'],
@@ -448,7 +451,7 @@ class AcadBestApiTest extends TestCase
             ->assertJsonPath('students.0.g.IT301.1', 90)
             ->assertJsonPath('students.0.g.IT301.2', 95)
             ->assertJsonPath('students.0.session', 'Weekends')
-            ->assertJsonPath('subjects.IT301.session', 'Weekends')
+            ->assertJsonPath('subjects.IT301.session', 'All')
             ->assertJsonPath('subjects.IT301.semester', $application->semester)
             ->assertJsonPath('subjects.IT301.academic_year', '2026-2027')
             ->assertJsonMissingPath('students.0.gc')
@@ -552,34 +555,55 @@ class AcadBestApiTest extends TestCase
             'room' => 'Lab 2',
             'program' => 'BSIT',
             'year_level' => '3',
-            'session' => 'Weekends',
+            'semester' => '1st Semester',
+            'academic_year' => '2026-2027',
         ];
         $created = $this->withToken($token)->postJson('/api/subjects', $subject)
             ->assertCreated()->assertJsonPath('code', 'IT305')
             ->assertJsonPath('start_time', '08:00')->assertJsonPath('end_time', '09:30')
             ->assertJsonPath('program', 'BSIT')
-            ->assertJsonPath('semester', null);
+            ->assertJsonPath('grade_weights', [])
+            ->assertJsonPath('semester', '1st Semester')
+            ->assertJsonPath('academic_year', '2026-2027')
+            ->assertJsonPath('session', 'All');
         $this->assertDatabaseHas('subjects', [
             'code' => 'IT305', 'name' => 'Applied Database Systems',
         ]);
+        $this->withToken($token)->postJson('/api/subjects', array_merge($subject, [
+            'code' => 'AB101',
+            'program' => 'ABSTM',
+            'room' => 'Room ABSTM',
+            'days' => 'Tue/Thu',
+            'academic_year' => null,
+        ]))->assertCreated()->assertJsonPath('program', 'ABSTM');
         $this->withToken($token)->postJson('/api/subjects', $subject)->assertUnprocessable();
         $this->withToken($token)->postJson('/api/subjects', ['code' => 'BAD'])->assertUnprocessable();
         $this->withToken($token)->postJson('/api/subjects', array_merge($subject, [
             'code' => 'IT307', 'semester' => 'Unspecified',
         ]))->assertUnprocessable();
         $this->withToken($token)->postJson('/api/subjects', array_merge($subject, [
-            'code' => 'IT308', 'days' => 'Mon/Wed/Fri',
+            'code' => 'IT308', 'days' => 'Mon/Funday',
         ]))->assertUnprocessable()->assertJsonValidationErrors('days');
+        $this->withToken($token)->postJson('/api/subjects', array_merge($subject, [
+            'code' => 'IT309', 'days' => 'Mon/Tue/Wed/Thu/Fri/Sat/Sun',
+            'start_time' => '11:00', 'end_time' => '12:00',
+        ]))->assertCreated()->assertJsonPath('days', 'Mon/Tue/Wed/Thu/Fri/Sat/Sun');
+        $this->withToken($token)->postJson('/api/subjects', array_merge($subject, [
+            'code' => 'IT310', 'days' => 'Wed/Sun',
+        ]))->assertUnprocessable()->assertJsonValidationErrors('room');
         $this->withToken($token)->postJson('/api/subjects', array_merge($subject, [
             'code' => 'IT306', 'start_time' => '10:00', 'end_time' => '09:00',
         ]))->assertUnprocessable();
+        Subject::where('code', 'IT305')->update(['session' => 'Weekends']);
         $this->withToken($token)->putJson('/api/subjects/IT305', [
             'start_time' => '09:00',
             'end_time' => '10:30',
             'program' => 'BSBA',
             'major' => 'Financial Management',
+            'session' => 'Invalid legacy input',
         ])->assertOk()->assertJsonPath('start_time', '09:00')->assertJsonPath('end_time', '10:30')
-            ->assertJsonPath('program', 'BSBA')->assertJsonPath('major', 'Financial Management');
+            ->assertJsonPath('program', 'BSBA')->assertJsonPath('major', 'Financial Management')
+            ->assertJsonPath('session', 'Weekends');
         $this->assertDatabaseHas('subjects', [
             'code' => $created->json('code'), 'program' => 'BSBA', 'major' => 'Financial Management',
             'session' => 'Weekends',
@@ -635,7 +659,6 @@ class AcadBestApiTest extends TestCase
                 'room' => 'Room '.$index,
                 'program' => 'All',
                 'year_level' => 'All',
-                'faculty_id' => null,
                 'session' => 'All',
                 'semester' => null,
                 'academic_year' => null,
@@ -646,8 +669,132 @@ class AcadBestApiTest extends TestCase
         $this->withToken($this->token('registrar@aces.edu.ph'))
             ->putJson('/api/faculty/'.$faculty->id.'/subjects', ['codes' => $codes])
             ->assertNoContent();
-        $this->assertSame(9, Subject::where('faculty_id', $faculty->id)->count());
+        $this->assertSame(9, $faculty->subjects()->count());
         $this->assertSame(27, Subject::whereIn('code', $codes)->sum('units'));
+    }
+
+    public function test_faculty_load_conflicts_are_checked_within_the_same_offering_term(): void
+    {
+        $faculty = User::where('email', 'faculty@aces.edu.ph')->firstOrFail();
+        foreach (['FC101', 'FC102'] as $code) {
+            Subject::create([
+                'code' => $code,
+                'name' => 'Faculty Conflict '.$code,
+                'units' => 3,
+                'days' => 'Mon/Wed',
+                'meeting_time' => '08:00-09:00',
+                'start_time' => '08:00',
+                'end_time' => '09:00',
+                'room' => 'Room '.$code,
+                'program' => 'All',
+                'year_level' => 'All',
+                'session' => 'All',
+                'semester' => '1st Semester',
+                'academic_year' => '2026-2027',
+            ]);
+        }
+
+        $token = $this->token('registrar@aces.edu.ph');
+        $this->withToken($token)->putJson('/api/faculty/'.$faculty->id.'/subjects', [
+            'codes' => ['FC101', 'FC102'],
+        ])->assertUnprocessable()->assertJsonValidationErrors('codes');
+
+        Subject::where('code', 'FC102')->update(['semester' => '2nd Semester']);
+        $this->withToken($token)->putJson('/api/faculty/'.$faculty->id.'/subjects', [
+            'codes' => ['FC101', 'FC102'],
+        ])->assertNoContent();
+    }
+
+    public function test_a_subject_can_be_assigned_to_multiple_faculty_without_transferring_assignments(): void
+    {
+        $facultyOne = User::where('email', 'faculty@aces.edu.ph')->firstOrFail();
+        $facultyTwo = User::factory()->create([
+            'role_id' => $facultyOne->role_id,
+            'password' => 'Faculty-Test-2026!',
+        ]);
+        $registrarToken = $this->token('registrar@aces.edu.ph');
+        Subject::create([
+            'code' => 'IT401',
+            'name' => 'Concurrent Teaching',
+            'units' => 3,
+            'days' => 'Mon/Wed',
+            'meeting_time' => '08:00-09:00',
+            'start_time' => '08:00',
+            'end_time' => '09:00',
+            'room' => 'Room 1',
+            'program' => 'All',
+            'year_level' => 'All',
+        ]);
+
+        $this->withToken($registrarToken)
+            ->putJson('/api/faculty/'.$facultyOne->id.'/subjects', ['codes' => ['IT401']])
+            ->assertNoContent();
+        $this->withToken($registrarToken)
+            ->putJson('/api/faculty/'.$facultyTwo->id.'/subjects', ['codes' => ['IT401']])
+            ->assertNoContent();
+        $this->withToken($registrarToken)
+            ->putJson('/api/faculty/'.$facultyTwo->id.'/subjects', ['codes' => ['IT401']])
+            ->assertNoContent();
+
+        $this->assertDatabaseCount('faculty_subject', 2);
+        $this->assertEqualsCanonicalizing(
+            [$facultyOne->id, $facultyTwo->id],
+            DB::table('faculty_subject')->where('subject_code', 'IT401')->pluck('faculty_id')->all()
+        );
+        $facultyPortal = $this->withToken($this->token($facultyTwo->email, 'Faculty-Test-2026!'))
+            ->getJson('/api/portal')->assertOk();
+        $this->assertEqualsCanonicalizing(
+            [$facultyOne->id, $facultyTwo->id],
+            $facultyPortal->json('subjects.IT401.faculty_ids')
+        );
+
+        $this->withToken($registrarToken)->putJson('/api/subjects/IT401', [
+            'name' => 'Concurrent Teaching Updated',
+        ])->assertOk();
+        $this->assertDatabaseCount('faculty_subject', 2);
+
+        $this->withToken($registrarToken)
+            ->putJson('/api/faculty/'.$facultyOne->id.'/subjects', ['codes' => []])
+            ->assertNoContent();
+        $this->assertDatabaseHas('faculty_subject', [
+            'faculty_id' => $facultyTwo->id,
+            'subject_code' => 'IT401',
+        ]);
+        $this->assertDatabaseMissing('faculty_subject', [
+            'faculty_id' => $facultyOne->id,
+            'subject_code' => 'IT401',
+        ]);
+        $this->assertSame(['IT401'], $facultyTwo->subjects()->pluck('subjects.code')->all());
+    }
+
+    public function test_faculty_assignment_migration_preserves_existing_subject_assignments(): void
+    {
+        $faculty = User::where('email', 'faculty@aces.edu.ph')->firstOrFail();
+        $migration = require database_path('migrations/2026_10_27_000000_create_faculty_subject_table.php');
+        $migration->down();
+
+        Subject::create([
+            'code' => 'IT402',
+            'name' => 'Legacy Faculty Assignment',
+            'units' => 3,
+            'days' => 'Tue/Thu',
+            'meeting_time' => '09:00-10:00',
+            'start_time' => '09:00',
+            'end_time' => '10:00',
+            'room' => 'Room 2',
+            'program' => 'All',
+            'year_level' => 'All',
+        ]);
+        DB::table('subjects')->where('code', 'IT402')->update(['faculty_id' => $faculty->id]);
+        $this->assertDatabaseHas('subjects', ['code' => 'IT402', 'faculty_id' => $faculty->id]);
+
+        $migration->up();
+
+        $this->assertDatabaseHas('faculty_subject', [
+            'faculty_id' => $faculty->id,
+            'subject_code' => 'IT402',
+        ]);
+        $this->assertFalse(Schema::hasColumn('subjects', 'faculty_id'));
     }
 
     public function test_student_subject_assignment_requires_a_matching_enrolled_application(): void
@@ -1112,6 +1259,53 @@ class AcadBestApiTest extends TestCase
         ])->assertOk()->assertJsonPath('st', 'Pending')->assertJsonPath('middle_name', 'Marie');
 
         return EnrollmentApplication::where('reference', $reference)->firstOrFail();
+    }
+
+    public function test_announcement_emails_are_recorded_and_delivered(): void
+    {
+        Mail::fake();
+        $registrar = $this->token('registrar@aces.edu.ph');
+
+        $id = $this->withToken($registrar)->postJson('/api/announcements', [
+            'title' => 'Records reminder',
+            'message' => 'Please settle your records before Friday.',
+            'priority' => 'Normal',
+            'publish_date' => now()->toDateString(),
+            'program' => 'BSIT', 'year_level' => '3', 'section' => 'A',
+        ])->assertCreated()
+            ->assertJsonPath('targeted', 1)
+            ->assertJsonPath('email_queued', 1)
+            ->json('id');
+
+        Mail::assertSent(
+            PortalNotice::class,
+            fn ($mail) => $mail->hasTo('student@aces.edu.ph')
+        );
+
+        $this->withToken($registrar)->getJson("/api/announcements/{$id}/delivery")
+            ->assertOk()
+            ->assertJsonPath('sent', 1)
+            ->assertJsonPath('failed', 0);
+    }
+
+    public function test_failed_email_is_reported_instead_of_hidden(): void
+    {
+        Mail::shouldReceive('to')->andThrow(new \RuntimeException('SMTP down'));
+        $registrar = $this->token('registrar@aces.edu.ph');
+
+        $id = $this->withToken($registrar)->postJson('/api/announcements', [
+            'title' => 'Records reminder',
+            'message' => 'Please settle your records before Friday.',
+            'priority' => 'Normal',
+            'publish_date' => now()->toDateString(),
+            'program' => 'BSIT', 'year_level' => '3', 'section' => 'A',
+        ])->assertCreated()->json('id');
+
+        $this->withToken($registrar)->getJson("/api/announcements/{$id}/delivery")
+            ->assertOk()
+            ->assertJsonPath('failed', 1)
+            ->assertJsonPath('sent', 0)
+            ->assertJsonPath('failed_recipients.0.error', 'SMTP down');
     }
 
     private function token(string $email, string $password = 'AcadBest-Demo-2026!'): string

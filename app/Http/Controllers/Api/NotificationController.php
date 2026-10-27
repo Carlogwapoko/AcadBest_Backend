@@ -46,7 +46,10 @@ class NotificationController extends Controller
             'message' => ['required', 'string', 'max:2000'],
         ]);
         $student = Student::findOrFail($data['student_id']);
-        if (! $student->subjects()->where('faculty_id', $request->user()->id)->exists()) {
+        if (! $student->subjects()->whereHas(
+            'faculty',
+            fn ($query) => $query->whereKey($request->user()->id)
+        )->exists()) {
             throw ValidationException::withMessages(['student_id' => ['You may only contact students in your assigned classes.']]);
         }
 

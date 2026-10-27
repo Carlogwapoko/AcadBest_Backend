@@ -27,6 +27,7 @@ Route::middleware('api.token')->group(function () {
     Route::put('/grades', [GradeController::class, 'storeBatch'])->middleware('role:faculty,registrar,admin');
     Route::put('/subjects/{subject}', [SubjectController::class, 'update'])->middleware('role:faculty,registrar,admin');
     Route::post('/announcements', [AnnouncementController::class, 'store'])->middleware('role:registrar,admin');
+    Route::get('/announcements/{announcement}/delivery', [AnnouncementController::class, 'delivery'])->middleware('role:registrar,admin');
     Route::put('/notifications/{notification}/read', [NotificationController::class, 'read'])->middleware('role:student');
     Route::put('/notifications/read-all', [NotificationController::class, 'readAll'])->middleware('role:student');
     Route::post('/notifications', [NotificationController::class, 'store'])->middleware('role:faculty');

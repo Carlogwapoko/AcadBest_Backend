@@ -56,7 +56,7 @@ class EnrollmentController extends Controller
             'date_of_birth' => ['required', 'date', 'before:today'],
             'sex' => ['required', 'string', Rule::in(['Male', 'Female', 'Others'])],
             'address' => ['required', 'string', 'min:5'],
-            'program' => ['required', 'string', Rule::in(['BSTM', 'BSED', 'BEED', 'BSE', 'BSMA', 'BSHM', 'BSIT', 'BSBA',
+            'program' => ['required', 'string', Rule::in(['ABSTM', 'BSTM', 'BSED', 'BEED', 'BSE', 'BSMA', 'BSHM', 'BSIT', 'BSBA',
                 'STEM', 'ABM', 'HUMSS', 'GAS', 'TVL'])],
             'major' => ['nullable', 'string', 'required_if:program,BSBA,BSED,TVL', Rule::in([
                 'Financial Management', 'Human Resources Management', 'Filipino', 'English', 'Mathematics',

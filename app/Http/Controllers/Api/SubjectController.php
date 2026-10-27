@@ -19,6 +19,7 @@ class SubjectController extends Controller
         $this->normalizeCode($request);
         $this->normalizeSchedule($request);
         $data = $this->validateSubject($request);
+        $this->assertNoRoomClash($data);
         $subject = Subject::create($this->map($data));
 
         return response()->json($subject, 201);
@@ -33,6 +34,7 @@ class SubjectController extends Controller
         $this->normalizeCode($request);
         $this->normalizeSchedule($request);
         $data = $this->validateSubject($request, $subject);
+        $this->assertNoRoomClash($data, $subject);
         $subject->update($this->map($data, $subject));
 
         return response()->json($subject->fresh()->toArray());
@@ -58,8 +60,7 @@ class SubjectController extends Controller
         $data = $request->validate(['codes' => ['present', 'array'], 'codes.*' => ['string', 'distinct', 'exists:subjects,code']]);
         $subjects = Subject::whereIn('code', $data['codes'])->get();
         $this->assertNoScheduleClashes($subjects);
-        Subject::where('faculty_id', $user->id)->update(['faculty_id' => null]);
-        Subject::whereIn('code', $data['codes'])->update(['faculty_id' => $user->id]);
+        $user->subjects()->sync($data['codes']);
 
         return response()->noContent();
     }
@@ -114,24 +115,31 @@ class SubjectController extends Controller
                 Rule::unique('subjects', 'code')->ignore($subject?->code, 'code')],
             'name' => [...$required, 'string', 'min:3', 'max:255'],
             'units' => [...$required, 'integer', 'min:1', 'max:6'],
-            'days' => [...$required, Rule::in(['Mon/Wed', 'Tue/Thu', 'Fri', 'Sat', 'Sun'])],
+            'days' => [...$required, 'string', 'min:3', 'max:27'],
             'start_time' => [...$required, 'date_format:H:i'],
             'end_time' => [...$required, 'date_format:H:i'],
             'room' => [...$required, 'string', 'max:50'],
             'program' => [...$required, 'string', Rule::in([
-                'All', 'BSIT', 'BSBA', 'BSTM', 'BSED', 'BEED', 'BSMA', 'BSHM', 'TVL',
+                'All', 'BSIT', 'BSBA', 'ABSTM', 'BSTM', 'BSED', 'BEED', 'BSMA', 'BSHM', 'TVL',
                 'BSE', 'STEM', 'ABM', 'HUMSS', 'GAS',
             ])],
             'major' => ['sometimes', 'nullable', 'string', Rule::in([
                 'Financial Management', 'Human Resources Management', 'Filipino', 'English', 'Mathematics',
                 'ICT – Computer Servicing', 'Home Economics', 'Automotive Servicing', 'Electricity Servicing',
             ])],
-            'year_level' => [...$required, 'string', 'max:10'],
-            'session' => ['sometimes', 'required', Rule::in(['All', 'Afternoon', 'Evening', 'Weekends'])],
+            'year_level' => [...$required, 'string', Rule::in(['All', '1', '2', '3', '4', '11', '12'])],
             'semester' => ['sometimes', 'nullable', Rule::in(['1st Semester', '2nd Semester', 'Summer'])],
             'academic_year' => ['nullable', 'string', 'regex:/^\d{4}-\d{4}$/', 'max:9'],
-            'faculty_id' => ['nullable', 'exists:users,id'],
         ]);
+        $days = explode('/', $data['days'] ?? $subject?->days ?? '');
+        $validDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        if ($days === [] || count($days) !== count(array_unique($days))
+            || array_diff($days, $validDays) !== []) {
+            throw ValidationException::withMessages([
+                'days' => ['Choose one or more valid weekdays without duplicates.'],
+            ]);
+        }
+
         $program = $request->input('program', $subject?->program);
         $major = $request->input('major', $subject?->major);
         $majors = match ($program) {
@@ -201,11 +209,6 @@ class SubjectController extends Controller
             ]);
         }
 
-        $facultyId = $data['faculty_id'] ?? $subject?->faculty_id;
-        if (! empty($facultyId) && User::with('role')->find($facultyId)?->role?->slug !== 'faculty') {
-            throw ValidationException::withMessages(['faculty_id' => ['Assign this subject to a faculty account.']]);
-        }
-
         return [
             'name' => $data['name'] ?? $subject?->name,
             'units' => $data['units'] ?? $subject?->units,
@@ -215,12 +218,11 @@ class SubjectController extends Controller
             'program' => $data['program'] ?? $subject?->program,
             'major' => array_key_exists('major', $data) ? $data['major'] : $subject?->major,
             'year_level' => (string) ($data['year_level'] ?? $subject?->year_level),
-            'session' => $data['session'] ?? $subject?->session ?? 'All',
+            'session' => $subject?->session ?? 'All',
             'semester' => array_key_exists('semester', $data) ? $data['semester'] : $subject?->semester,
             'academic_year' => array_key_exists('academic_year', $data)
                 ? $data['academic_year']
                 : $subject?->academic_year,
-            'faculty_id' => $facultyId,
         ] + (isset($data['code']) ? ['code' => strtoupper($data['code'])] : []);
     }
 
@@ -232,12 +234,48 @@ class SubjectController extends Controller
                 $first = $subjects[$i];
                 $second = $subjects[$j];
                 $sharedDays = array_intersect(explode('/', $first->days), explode('/', $second->days));
-                if ($first->start_time < $second->end_time && $second->start_time < $first->end_time
+                $sameAcademicYear = ! $first->academic_year || ! $second->academic_year
+                    || $first->academic_year === $second->academic_year;
+                $sameSemester = ! $first->semester || ! $second->semester
+                    || $first->semester === $second->semester;
+                if ($sameAcademicYear && $sameSemester
+                    && $first->start_time < $second->end_time && $second->start_time < $first->end_time
                     && $sharedDays !== []) {
                     throw ValidationException::withMessages([
                         'codes' => ['Schedule conflict: '.$first->code.' and '.$second->code.' overlap.'],
                     ]);
                 }
+            }
+        }
+    }
+
+    private function assertNoRoomClash(array $data, ?Subject $subject = null): void
+    {
+        $academicYear = $data['academic_year'] ?? $subject?->academic_year;
+        $semester = $data['semester'] ?? $subject?->semester;
+        $roomSubjects = Subject::query()
+            ->whereRaw('LOWER(TRIM(room)) = ?', [mb_strtolower(trim($data['room'] ?? $subject?->room ?? ''))])
+            ->when($subject, fn ($query) => $query->where('code', '!=', $subject->code))
+            ->when($academicYear, function ($query) use ($academicYear): void {
+                $query->where(fn ($scope) => $scope->whereNull('academic_year')
+                    ->orWhere('academic_year', $academicYear));
+            })
+            ->when($semester, function ($query) use ($semester): void {
+                $query->where(fn ($scope) => $scope->whereNull('semester')
+                    ->orWhere('semester', $semester));
+            })
+            ->get();
+        $days = explode('/', $data['days'] ?? $subject?->days ?? '');
+        $start = $data['start_time'] ?? $subject?->start_time;
+        $end = $data['end_time'] ?? $subject?->end_time;
+
+        foreach ($roomSubjects as $roomSubject) {
+            $sharedDays = array_intersect($days, explode('/', $roomSubject->days));
+            if ($sharedDays !== []
+                && $start < $roomSubject->end_time && $roomSubject->start_time < $end) {
+                throw ValidationException::withMessages([
+                    'room' => ['This room is already booked during the selected day and time.'],
+                ]);
             }
         }
     }

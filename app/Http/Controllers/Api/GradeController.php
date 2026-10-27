@@ -25,7 +25,7 @@ class GradeController extends Controller
         ]);
         $subject = Subject::findOrFail($data['subject_code']);
         $actor = $request->user();
-        if ($actor->role?->slug === 'faculty' && $subject->faculty_id !== $actor->id) {
+        if ($actor->role?->slug === 'faculty' && ! $subject->faculty()->whereKey($actor->id)->exists()) {
             return response()->json(['message' => 'You may only enter grades for your assigned subjects.'], 403);
         }
 

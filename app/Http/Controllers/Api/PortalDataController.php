@@ -23,7 +23,7 @@ class PortalDataController extends Controller
         $role = $user->role->slug;
         $student = $user->student;
 
-        $subjectQuery = Subject::query();
+        $subjectQuery = Subject::query()->with('faculty:id');
         $studentQuery = Student::query()
             ->select(['id', 'user_id', 'school_id', 'enrollment_application_id', 'status', 'program', 'major',
                 'year_level', 'section', 'session', 'semester'])
@@ -32,7 +32,8 @@ class PortalDataController extends Controller
                 'enrollmentApplication:id,academic_year',
                 'enrollmentApplications' => fn ($query) => $query->where('status', 'Enrolled')
                     ->latest('id')->select(['id', 'student_id', 'status', 'academic_year', 'semester', 'program', 'major', 'session']),
-                'subjects:code,name,units,days,meeting_time,start_time,end_time,room,program,major,year_level,faculty_id,session,semester,academic_year',
+                'subjects:code,name,units,days,meeting_time,start_time,end_time,room,program,major,year_level,session,semester,academic_year',
+                'subjects.faculty:id',
             ]);
 
         if ($role === 'student') {
@@ -43,16 +44,13 @@ class PortalDataController extends Controller
 
             $studentQuery->whereKey($student?->id ?? 0);
         } elseif ($role === 'faculty') {
-            $subjectQuery->where('faculty_id', $user->id);
+            $subjectQuery->whereHas('faculty', fn ($query) => $query->whereKey($user->id));
 
             $subjectCodes = (clone $subjectQuery)->pluck('code');
 
             $studentQuery->whereHas(
                 'subjects',
-                fn ($query) => $query->whereIn(
-                    'subjects.code',
-                    $subjectCodes
-                )
+                fn ($query) => $query->whereIn('subjects.code', $subjectCodes)
             );
         } elseif (! in_array($role, ['registrar', 'admin'], true)) {
             $studentQuery->whereKey(0);
@@ -118,9 +116,10 @@ class PortalDataController extends Controller
         $gradesByStudent = $gradeRows->groupBy('student_id');
         $gradedSubjects = $gradeRows->isEmpty()
             ? collect()
-            : Subject::whereIn('code', $gradeRows->pluck('subject_code')->unique())
+            : Subject::with('faculty:id')
+                ->whereIn('code', $gradeRows->pluck('subject_code')->unique())
                 ->get(['code', 'name', 'units', 'days', 'meeting_time', 'start_time', 'end_time', 'room',
-                    'program', 'major', 'year_level', 'faculty_id', 'session', 'semester', 'academic_year'])
+                    'program', 'major', 'year_level', 'session', 'semester', 'academic_year'])
                 ->keyBy('code');
         if ($role === 'student') {
             $subjects = $subjects->concat($gradedSubjects->values())->unique('code');
@@ -286,7 +285,8 @@ class PortalDataController extends Controller
                             ? (int) $subject->year_level
                             : $subject->year_level,
 
-                        'f' => $subject->faculty_id,
+                        'faculty_ids' => $subject->faculty->modelKeys(),
+                        'f' => $subject->faculty->modelKeys()[0] ?? null,
                     ],
                 ]
             ),

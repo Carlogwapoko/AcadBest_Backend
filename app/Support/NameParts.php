@@ -42,7 +42,7 @@ final class NameParts
             $rest = self::stripSuffix($rest, $middleTokens);
 
             if ($firstName === '' && $lastName === '') {
-                if (count($rest) >= 2) {
+                if (count($rest) === 2) {
                     $lastName = (string) array_pop($rest);
                     $firstName = implode(' ', $rest);
                 } elseif (count($rest) === 1) {

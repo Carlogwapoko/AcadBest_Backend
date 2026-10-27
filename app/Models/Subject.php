@@ -3,7 +3,6 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Subject extends Model
@@ -14,19 +13,24 @@ class Subject extends Model
 
     protected $keyType = 'string';
 
+    protected $attributes = [
+        'grade_weights' => '[]',
+    ];
+
     protected $fillable = [
         'code', 'name', 'units', 'days', 'meeting_time', 'start_time', 'end_time',
-        'room', 'program', 'major', 'year_level', 'faculty_id', 'session', 'semester', 'academic_year',
+        'room', 'program', 'major', 'year_level', 'session', 'semester', 'academic_year',
     ];
 
     protected function casts(): array
     {
-        return ['units' => 'integer'];
+        return ['units' => 'integer', 'grade_weights' => 'array'];
     }
 
-    public function faculty(): BelongsTo
+    public function faculty(): BelongsToMany
     {
-        return $this->belongsTo(User::class, 'faculty_id');
+        return $this->belongsToMany(User::class, 'faculty_subject', 'subject_code', 'faculty_id', 'code')
+            ->withTimestamps();
     }
 
     public function students(): BelongsToMany

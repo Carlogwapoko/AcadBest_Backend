@@ -2,18 +2,17 @@
 
 namespace App\Services;
 
-use App\Mail\PortalNotice;
 use App\Models\Grade;
 use App\Models\Student;
 use App\Models\Subject;
 use App\Models\User;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Mail;
 
 class StandingService
 {
     public const TERMS = ['Prelim', 'Midterm', 'Final'];
+
     private ?array $cachedRules = null;
 
     /** Configurable rules from Admin → Standing Rules. 'trend' = points drop that triggers monitoring. */
@@ -98,7 +97,7 @@ class StandingService
     /** Re-check one student after grades change. Alerts only when the status actually changes. */
     public function refresh(Student $student): array
     {
-        $student->load(['subjects', 'user']);
+        $student->load(['subjects.faculty', 'user']);
         $grades = Grade::where('student_id', $student->id)->get()->groupBy('subject_code');
         $result = $this->evaluate($student->subjects, $grades);
 
@@ -126,7 +125,9 @@ class StandingService
             $detail .= ' Declining trend: '.implode(', ', $result['declining']).'.';
         }
 
-        $facultyIds = $student->subjects->pluck('faculty_id')->filter()->unique();
+        $facultyIds = $student->subjects
+            ->flatMap(fn (Subject $subject) => $subject->faculty->modelKeys())
+            ->unique();
         foreach (User::whereIn('id', $facultyIds)->get() as $faculty) {
             DB::table('faculty_alerts')->insert([
                 'faculty_id' => $faculty->id, 'student_id' => $student->id, 'status' => $result['status'],
@@ -147,17 +148,15 @@ class StandingService
         }
     }
 
+    /** Records the email, then sends it after the response. The result is stored in mail_deliveries. */
     private function mail(?string $to, string $title, string $body): void
     {
         if (! $to) {
             return;
         }
-        dispatch(function () use ($to, $title, $body) {
-            try {
-                Mail::to($to)->send(new PortalNotice($title, $body));
-            } catch (\Throwable $error) {
-                report($error);
-            }
-        })->afterResponse();
+
+        $id = app(MailDeliveryService::class)->record($to, $title, $body);
+
+        dispatch(static fn () => app(MailDeliveryService::class)->deliver($id))->afterResponse();
     }
 }
