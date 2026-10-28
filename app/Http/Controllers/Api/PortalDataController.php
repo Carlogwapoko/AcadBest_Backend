@@ -4,11 +4,13 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Announcement;
+use App\Models\EnrollmentApplication;
 use App\Models\Grade;
 use App\Models\ServiceRequest;
 use App\Models\Student;
 use App\Models\Subject;
 use App\Models\User;
+use App\Services\AcademicYearService;
 use App\Services\StandingService;
 use App\Support\NameParts;
 use Illuminate\Http\Request;
@@ -17,7 +19,7 @@ use Illuminate\Support\Facades\DB;
 
 class PortalDataController extends Controller
 {
-    public function index(Request $request, StandingService $standing)
+    public function index(Request $request, StandingService $standing, AcademicYearService $academicYear)
     {
         $user = $request->user()->load('role');
         $role = $user->role->slug;
@@ -32,15 +34,21 @@ class PortalDataController extends Controller
                 'enrollmentApplication:id,academic_year',
                 'enrollmentApplications' => fn ($query) => $query->where('status', 'Enrolled')
                     ->latest('id')->select(['id', 'student_id', 'status', 'academic_year', 'semester', 'program', 'major', 'session']),
+                'enrollmentApplications.subjects:code,name,units,days,meeting_time,start_time,end_time,room,program,major,year_level,session,semester,academic_year',
                 'subjects:code,name,units,days,meeting_time,start_time,end_time,room,program,major,year_level,session,semester,academic_year',
                 'subjects.faculty:id',
             ]);
 
         if ($role === 'student') {
-            $subjectQuery->whereIn(
-                'code',
-                $student?->subjects()->pluck('subjects.code') ?? []
-            );
+            $legacyCodes = $student?->subjects()->pluck('subjects.code') ?? collect();
+            $enrollmentCodes = $student
+                ? DB::table('enrollment_subject')
+                    ->join('enrollment_applications', 'enrollment_applications.id', '=', 'enrollment_subject.enrollment_application_id')
+                    ->where('enrollment_applications.student_id', $student->id)
+                    ->where('enrollment_applications.status', 'Enrolled')
+                    ->pluck('enrollment_subject.subject_code')
+                : collect();
+            $subjectQuery->whereIn('code', $legacyCodes->merge($enrollmentCodes)->unique());
 
             $studentQuery->whereKey($student?->id ?? 0);
         } elseif ($role === 'faculty') {
@@ -139,15 +147,16 @@ class PortalDataController extends Controller
                 $gradesByTerm = $own->keyBy(
                     fn (Grade $grade) => $grade->subject_code.'|'.$grade->term
                 );
-                $recordSubjects = $record->subjects->concat(
+                $recordEnrollmentSubjects = $record->enrollmentApplications
+                    ->flatMap(fn (EnrollmentApplication $application) => $application->subjects);
+                $summary = $standing->evaluate(
+                    $record->subjects->concat($recordEnrollmentSubjects)->unique('code'),
+                    $own->groupBy('subject_code')
+                );
+                $recordSubjects = $record->subjects->concat($recordEnrollmentSubjects)->concat(
                     $gradedSubjects->only($own->pluck('subject_code')->unique()->all())->values()
                 )->unique('code');
                 $enrollment = $record->enrollmentApplications->first();
-
-                $summary = $standing->evaluate(
-                    $record->subjects,
-                    $own->groupBy('subject_code')
-                );
 
                 $user = $record->user;
                 $nameParts = $user
@@ -184,6 +193,12 @@ class PortalDataController extends Controller
                     'major' => $enrollment?->major ?? $record->major,
                     'semester' => $enrollment?->semester ?? $record->semester,
                     'academic_year' => $enrollment?->academic_year ?? $record->enrollmentApplication?->academic_year,
+                    'academic_years' => $record->enrollmentApplications
+                        ->pluck('academic_year')
+                        ->filter()
+                        ->unique()
+                        ->sort()
+                        ->values(),
                     'enrollment_status' => $enrollment?->status,
                     'subject_codes' => $record->subjects->pluck('code')->values(),
                     'status' => $record->status,
@@ -197,6 +212,12 @@ class PortalDataController extends Controller
                 ];
             }
         );
+        $eligibleEnrollments = in_array($role, ['registrar', 'admin'], true)
+            ? $this->eligibleEnrollmentRows()
+            : [];
+        if ($role === 'faculty') {
+            $studentRows = collect($this->facultyEnrollmentRows($user));
+        }
 
         // Portal settings
         $settings = DB::table('portal_settings')
@@ -280,18 +301,34 @@ class PortalDataController extends Controller
                         'session' => $subject->session,
                         'semester' => $subject->semester,
                         'academic_year' => $subject->academic_year,
+                        'grade_weights' => $subject->grade_weights ?? [],
 
                         'y' => is_numeric($subject->year_level)
                             ? (int) $subject->year_level
                             : $subject->year_level,
 
-                        'faculty_ids' => $subject->faculty->modelKeys(),
-                        'f' => $subject->faculty->modelKeys()[0] ?? null,
+                        'faculty_ids' => collect($subject->faculty->modelKeys())->unique()->values(),
+                        'faculty_assignments' => $subject->faculty->map(fn (User $faculty) => [
+                            'id' => $faculty->pivot->id,
+                            'faculty_id' => $faculty->id,
+                            'semester' => $faculty->pivot->semester,
+                            'academic_year' => $faculty->pivot->academic_year,
+                            'section' => $faculty->pivot->section,
+                            'session' => $faculty->pivot->session
+                                ?? ($subject->session !== 'All' ? $subject->session : 'Afternoon'),
+                            'days' => $faculty->pivot->days ?? $subject->days,
+                            'start_time' => $faculty->pivot->start_time ?? $subject->start_time,
+                            'end_time' => $faculty->pivot->end_time ?? $subject->end_time,
+                            'room' => $faculty->pivot->room ?? $subject->room,
+                        ])->values(),
+                        'f' => collect($subject->faculty->modelKeys())->unique()->first(),
                     ],
                 ]
             ),
 
             'students' => $studentRows,
+            'eligible_enrollments' => $eligibleEnrollments,
+            'academic_year' => $academicYear->current(),
 
             'open_request_count' => $student
                 ? ServiceRequest::where('student_id', $student->id)
@@ -361,5 +398,188 @@ class PortalDataController extends Controller
                 'Copy of Grades',
             ],
         ]);
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function eligibleEnrollmentRows(): array
+    {
+        return EnrollmentApplication::query()
+            ->where('status', 'Enrolled')
+            ->whereNotNull('student_id')
+            ->whereNotNull('semester')
+            ->whereNotNull('academic_year')
+            ->with(['student.user', 'student.subjects', 'subjects', 'grades'])
+            ->latest('id')
+            ->get()
+            ->filter(fn (EnrollmentApplication $application) => $this->isEligibleStudentRecord($application))
+            ->map(fn (EnrollmentApplication $application) => $this->enrollmentRow(
+                $application,
+                $this->enrolledSubjectCodes($application)
+            ))
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function facultyEnrollmentRows(User $faculty): array
+    {
+        $assignments = DB::table('faculty_subject')
+            ->where('faculty_id', $faculty->id)
+            ->get(['subject_code', 'semester', 'academic_year', 'section', 'session'])
+            ->groupBy('subject_code');
+
+        if ($assignments->isEmpty()) {
+            return [];
+        }
+
+        return EnrollmentApplication::query()
+            ->where('status', 'Enrolled')
+            ->whereNotNull('student_id')
+            ->whereNotNull('semester')
+            ->whereNotNull('academic_year')
+            ->with(['student.user', 'student.subjects', 'subjects', 'grades'])
+            ->latest('id')
+            ->get()
+            ->filter(fn (EnrollmentApplication $application) => $this->isEligibleStudentRecord($application))
+            ->map(function (EnrollmentApplication $application) use ($assignments): ?array {
+                $section = $application->student->section;
+                $codes = collect($this->enrolledSubjectCodes($application))
+                    ->filter(function (string $code) use ($application, $assignments, $section): bool {
+                        return $assignments->get($code, collect())->contains(
+                            fn (object $assignment): bool => $assignment->semester === $application->semester
+                                && $assignment->academic_year === $application->academic_year
+                                && in_array($assignment->session, [$application->session ?: 'Afternoon', 'All'], true)
+                                && ($assignment->section === 'All' || $assignment->section === $section)
+                        );
+                    })
+                    ->values()
+                    ->all();
+
+                return $codes ? $this->enrollmentRow($application, $codes) : null;
+            })
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    private function isEligibleStudentRecord(EnrollmentApplication $application): bool
+    {
+        if (! $application->student
+            || in_array(strtolower((string) $application->student_status), [
+                'applicant', 'pending', 'rejected', 'withdrawn', 'not enrolled',
+            ], true)) {
+            return false;
+        }
+
+        return ! in_array(
+            strtolower((string) $application->student->status),
+            ['applicant', 'pending', 'rejected', 'withdrawn', 'not enrolled'],
+            true
+        );
+    }
+
+    /**
+     * Reconcile current application subject links with legacy student loads.
+     * Legacy links are included only when the subject matches this enrollment's scope.
+     *
+     * @return list<string>
+     */
+    private function enrolledSubjectCodes(EnrollmentApplication $application): array
+    {
+        return $application->subjects
+            ->concat($application->student?->subjects ?? collect())
+            ->filter(fn (Subject $subject): bool => $this->matchesEnrollmentScope($subject, $application))
+            ->pluck('code')
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    private function matchesEnrollmentScope(Subject $subject, EnrollmentApplication $application): bool
+    {
+        return ($subject->program === 'All' || $subject->program === $application->program)
+            && ($subject->major === null || $subject->major === $application->major)
+            && $this->matchesEnrollmentSession($subject, $application)
+            && ($subject->semester === null || $subject->semester === $application->semester)
+            && ($subject->academic_year === null || $subject->academic_year === $application->academic_year);
+    }
+
+    private function matchesEnrollmentSession(Subject $subject, EnrollmentApplication $application): bool
+    {
+        if (! $application->session || $subject->session === 'All' || $subject->session === $application->session) {
+            return true;
+        }
+
+        return DB::table('faculty_subject')
+            ->where('subject_code', $subject->code)
+            ->where('semester', $application->semester)
+            ->where('academic_year', $application->academic_year)
+            ->whereIn('session', [$application->session, 'All'])
+            ->where(fn ($query) => $query->where('section', 'All')
+                ->orWhere('section', $application->student?->section ?? ''))
+            ->exists();
+    }
+
+    /**
+     * @param  list<string>|null  $subjectCodes
+     * @return array<string, mixed>
+     */
+    private function enrollmentRow(EnrollmentApplication $application, ?array $subjectCodes = null): array
+    {
+        $student = $application->student;
+        $user = $student?->user;
+        $parts = NameParts::resolve(
+            $application->name,
+            $application->first_name ?: $user?->first_name,
+            $application->middle_name ?: $user?->middle_name,
+            $application->last_name ?: $user?->last_name
+        );
+        $enrolledCodes = $subjectCodes ?? $application->subjects->pluck('code')->values()->all();
+        $grades = $application->grades->keyBy(fn (Grade $grade) => $grade->subject_code.'|'.$grade->term);
+        foreach (Grade::query()
+            ->whereNull('enrollment_application_id')
+            ->where('student_id', $student->id)
+            ->whereIn('subject_code', $enrolledCodes)
+            ->get() as $legacyGrade) {
+            $grades->put($legacyGrade->subject_code.'|'.$legacyGrade->term, $legacyGrade);
+        }
+        $bySubject = [];
+        foreach ($enrolledCodes as $code) {
+            $bySubject[$code] = collect(['Prelim', 'Midterm', 'Final'])
+                ->map(fn (string $term) => $grades->get($code.'|'.$term)?->score)
+                ->all();
+        }
+
+        return [
+            'id' => $student->id,
+            'enrollment_id' => $application->id,
+            'enrollment_ref' => $application->reference,
+            'name' => NameParts::displayName(
+                $application->name,
+                $parts['first_name'],
+                $parts['middle_name'],
+                $parts['last_name'],
+                true
+            ),
+            'first_name' => $parts['first_name'] ?: null,
+            'middle_name' => $parts['middle_name'] ?: null,
+            'last_name' => $parts['last_name'] ?: null,
+            'school_id' => $student->school_id,
+            'session' => $application->session,
+            'academic_year' => $application->academic_year,
+            'major' => $application->major,
+            'semester' => $application->semester,
+            'enrollment_status' => $application->status,
+            'subject_codes' => $enrolledCodes,
+            'status' => $student->status,
+            'prog' => $application->program,
+            'yr' => $application->year_level,
+            'sec' => $student->section,
+            'g' => $bySubject,
+        ];
     }
 }

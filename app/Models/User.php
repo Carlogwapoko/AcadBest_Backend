@@ -49,6 +49,7 @@ class User extends Authenticatable
     public function subjects(): BelongsToMany
     {
         return $this->belongsToMany(Subject::class, 'faculty_subject', 'faculty_id', 'subject_code', 'id', 'code')
+            ->withPivot(['semester', 'academic_year', 'section'])
             ->withTimestamps();
     }
 }

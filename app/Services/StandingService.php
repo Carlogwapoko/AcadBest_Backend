@@ -33,7 +33,7 @@ class StandingService
     }
 
     /** Overall subject grade from three valid grading periods with equal weighting. */
-    public function subjectAverage(Collection $byTerm): ?float
+    public function subjectAverage(Collection $byTerm, array $weights = []): ?float
     {
         $scores = [];
         foreach (self::TERMS as $term) {
@@ -44,7 +44,19 @@ class StandingService
             $scores[] = $score;
         }
 
-        return round(array_sum($scores) / count(self::TERMS), 2);
+        $periodWeights = array_map(
+            fn (string $term): float => (float) ($weights[$term] ?? 100 / count(self::TERMS)),
+            self::TERMS
+        );
+        if (abs(array_sum($periodWeights) - 100) > 0.001) {
+            $periodWeights = array_fill(0, count(self::TERMS), 100 / count(self::TERMS));
+        }
+
+        return round(array_sum(array_map(
+            fn (float $score, float $weight): float => $score * $weight / 100,
+            $scores,
+            $periodWeights
+        )), 2);
     }
 
     /**
@@ -62,7 +74,7 @@ class StandingService
 
         foreach ($subjects as $subject) {
             $byTerm = $gradesBySubject->get($subject->code, collect())->keyBy('term');
-            $avg = $this->subjectAverage($byTerm);
+            $avg = $this->subjectAverage($byTerm, $subject->grade_weights ?? []);
             if ($avg === null) {
                 continue;
             }

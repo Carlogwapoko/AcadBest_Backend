@@ -8,6 +8,7 @@ use App\Models\Student;
 use App\Models\Subject;
 use App\Services\AcademicYearService;
 use App\Support\NameParts;
+use App\Support\ProgramCatalog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -38,7 +39,11 @@ class EnrollmentController extends Controller
 
     public function store(Request $request, AcademicYearService $academicYear)
     {
-        foreach (['first_name', 'middle_name', 'last_name'] as $field) {
+        foreach ([
+            'first_name', 'middle_name', 'last_name',
+            'mother_first_name', 'mother_middle_name', 'mother_last_name',
+            'father_first_name', 'father_middle_name', 'father_last_name',
+        ] as $field) {
             $value = $request->input($field);
             if (is_string($value)) {
                 $request->merge([$field => trim($value) === '' ? null : trim($value)]);
@@ -56,12 +61,10 @@ class EnrollmentController extends Controller
             'date_of_birth' => ['required', 'date', 'before:today'],
             'sex' => ['required', 'string', Rule::in(['Male', 'Female', 'Others'])],
             'address' => ['required', 'string', 'min:5'],
-            'program' => ['required', 'string', Rule::in(['ABSTM', 'BSTM', 'BSED', 'BEED', 'BSE', 'BSMA', 'BSHM', 'BSIT', 'BSBA',
-                'STEM', 'ABM', 'HUMSS', 'GAS', 'TVL'])],
-            'major' => ['nullable', 'string', 'required_if:program,BSBA,BSED,TVL', Rule::in([
-                'Financial Management', 'Human Resources Management', 'Filipino', 'English', 'Mathematics',
-                'ICT – Computer Servicing', 'Home Economics', 'Automotive Servicing', 'Electricity Servicing',
-            ])],
+            'program' => ['required', 'string', Rule::in(ProgramCatalog::PROGRAMS)],
+            'major' => ['nullable', 'string', Rule::requiredIf(
+                fn (): bool => ProgramCatalog::majorsFor((string) $request->input('program')) !== []
+            ), Rule::in(ProgramCatalog::allMajors())],
             'year_level' => ['required', 'integer', 'min:1', 'max:12'],
             'session' => ['nullable', 'string', Rule::in(['Afternoon', 'Evening', 'Weekends'])],
             'semester' => ['required', 'string', Rule::in(['1st Semester', '2nd Semester'])],
@@ -69,6 +72,12 @@ class EnrollmentController extends Controller
             'previous_school' => ['required', 'string', 'min:3', 'max:255'],
             'guardian_name' => ['required', 'string', 'min:3', 'max:255'],
             'guardian_phone' => ['required', 'string', 'max:30'],
+            'mother_first_name' => ['nullable', 'string', 'max:255'],
+            'mother_middle_name' => ['nullable', 'string', 'max:255'],
+            'mother_last_name' => ['nullable', 'string', 'max:255'],
+            'father_first_name' => ['nullable', 'string', 'max:255'],
+            'father_middle_name' => ['nullable', 'string', 'max:255'],
+            'father_last_name' => ['nullable', 'string', 'max:255'],
             'certified' => ['required', 'accepted'],
         ]);
         if (! $academicYear->isValid($data['academic_year'])) {
@@ -76,7 +85,7 @@ class EnrollmentController extends Controller
                 'academic_year' => ['Choose a valid academic year, such as 2026-2027.'],
             ]);
         }
-        if (isset($data['major']) && ! in_array($data['major'], $this->majorsFor($data['program']), true)) {
+        if (isset($data['major']) && ! in_array($data['major'], ProgramCatalog::majorsFor($data['program']), true)) {
             throw ValidationException::withMessages([
                 'major' => ['Choose a major offered by the selected program.'],
             ]);
@@ -127,6 +136,12 @@ class EnrollmentController extends Controller
             'academic_year' => $application->academic_year,
             'semester' => $application->semester,
             'major' => $application->major,
+            'mother_first_name' => $application->mother_first_name,
+            'mother_middle_name' => $application->mother_middle_name,
+            'mother_last_name' => $application->mother_last_name,
+            'father_first_name' => $application->father_first_name,
+            'father_middle_name' => $application->father_middle_name,
+            'father_last_name' => $application->father_last_name,
             'school_id' => $application->student?->school_id,
             'note' => $application->reviewer_note ?? '',
             'log' => collect($application->history)->map(fn ($item) => [$item['date'], $item['action']])->all(),
@@ -138,30 +153,64 @@ class EnrollmentController extends Controller
         $data = $request->validate([
             'status' => ['sometimes', 'required', Rule::in(['Pending', 'Under Review', 'Enrolled', 'Rejected'])],
             'note' => ['nullable', 'string', 'max:2000'],
+            'mother_first_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'mother_middle_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'mother_last_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'father_first_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'father_middle_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'father_last_name' => ['sometimes', 'nullable', 'string', 'max:255'],
             'subjects' => ['sometimes', 'array'],
             'subjects.*' => ['string', 'exists:subjects,code'],
         ]);
+        $parentFields = array_intersect_key($data, array_flip([
+            'mother_first_name', 'mother_middle_name', 'mother_last_name',
+            'father_first_name', 'father_middle_name', 'father_last_name',
+        ]));
         if (isset($data['subjects']) && ! isset($data['status'])) {
-            if ($enrollment->session && Subject::query()
-                ->whereIn('code', $data['subjects'])
-                ->whereNotIn('session', ['All', $enrollment->session])
-                ->exists()) {
+            $enrollment->loadMissing('student');
+            if ($enrollment->status !== 'Enrolled' || ! $enrollment->student_id || ! $enrollment->student
+                || in_array(strtolower((string) $enrollment->student_status), [
+                    'applicant', 'pending', 'rejected', 'withdrawn', 'not enrolled',
+                ], true)
+                || in_array(strtolower((string) $enrollment->student->status), [
+                    'applicant', 'pending', 'rejected', 'withdrawn', 'not enrolled',
+                ], true)) {
                 throw ValidationException::withMessages([
-                    'subjects' => ['The subject load must match the applicant’s selected session.'],
+                    'student' => ['Subjects can only be assigned to an approved enrollment linked to a student profile.'],
                 ]);
             }
-            $enrollment->update(['requested_subjects' => $data['subjects']]);
+            $subjects = Subject::query()->whereIn('code', $data['subjects'])->get();
+            if ($subjects->contains(fn (Subject $subject) => ! $this->matchesEnrollment($subject, $enrollment))) {
+                throw ValidationException::withMessages([
+                    'subjects' => ['The subject load must match the enrolled student’s program, major, session, semester, and academic year.'],
+                ]);
+            }
+            $this->assertNoScheduleClashes($subjects);
+            DB::transaction(function () use ($data, $enrollment, $parentFields): void {
+                $enrollment->subjects()->sync($data['subjects']);
+                $enrollment->update(['requested_subjects' => $data['subjects'], ...$parentFields]);
+                $enrollment->student->subjects()->syncWithoutDetaching($data['subjects']);
+            });
 
-            return response()->noContent();
+            return response()->json(['codes' => $enrollment->subjects()->pluck('subjects.code')->all()]);
         }
         if (! isset($data['status'])) {
+            if ($parentFields !== []) {
+                $enrollment->update($parentFields);
+
+                return response()->json([
+                    'status' => $enrollment->status,
+                    'note' => $enrollment->reviewer_note,
+                    ...$parentFields,
+                ]);
+            }
             throw ValidationException::withMessages(['status' => ['Choose an application status.']]);
         }
         if ($enrollment->account_issued && $data['status'] !== 'Enrolled') {
             throw ValidationException::withMessages(['status' => ['An application with an issued account cannot be changed from Enrolled.']]);
         }
 
-        $schoolId = DB::transaction(function () use ($data, $enrollment) {
+        $schoolId = DB::transaction(function () use ($data, $enrollment, $parentFields) {
             $application = EnrollmentApplication::whereKey($enrollment->getKey())
                 ->lockForUpdate()
                 ->firstOrFail();
@@ -223,6 +272,7 @@ class EnrollmentController extends Controller
                     : 'Applicant',
                 'reviewer_note' => $data['note'] ?? $application->reviewer_note,
                 'history' => $history,
+                ...$parentFields,
             ]);
 
             return $student?->school_id;
@@ -267,6 +317,12 @@ class EnrollmentController extends Controller
             'type' => $application->application_type,
             'school' => $application->previous_school, 'gname' => $application->guardian_name,
             'gph' => $application->guardian_phone, 'st' => $application->status,
+            'mother_first_name' => $application->mother_first_name,
+            'mother_middle_name' => $application->mother_middle_name,
+            'mother_last_name' => $application->mother_last_name,
+            'father_first_name' => $application->father_first_name,
+            'father_middle_name' => $application->father_middle_name,
+            'father_last_name' => $application->father_last_name,
             'date' => $application->created_at->format('M d'), 'note' => $application->reviewer_note ?? '',
             'acct' => $application->account_issued, 'subs' => $application->requested_subjects ?? [],
             'school_id' => $application->student?->school_id,
@@ -282,18 +338,46 @@ class EnrollmentController extends Controller
         ));
     }
 
-    private function majorsFor(string $program): array
+    private function matchesEnrollment(Subject $subject, EnrollmentApplication $application): bool
     {
-        return match ($program) {
-            'BSBA' => ['Financial Management', 'Human Resources Management'],
-            'BSED' => ['Filipino', 'English', 'Mathematics'],
-            'TVL' => [
-                'ICT – Computer Servicing',
-                'Home Economics',
-                'Automotive Servicing',
-                'Electricity Servicing',
-            ],
-            default => [],
-        };
+        return ($subject->program === 'All' || $subject->program === $application->program)
+            && ($subject->major === null || $subject->major === $application->major)
+            && $this->matchesEnrollmentSession($subject, $application)
+            && ($subject->semester === null || $subject->semester === $application->semester)
+            && ($subject->academic_year === null || $subject->academic_year === $application->academic_year);
+    }
+
+    private function matchesEnrollmentSession(Subject $subject, EnrollmentApplication $application): bool
+    {
+        if (! $application->session || $subject->session === 'All' || $subject->session === $application->session) {
+            return true;
+        }
+
+        return DB::table('faculty_subject')
+            ->where('subject_code', $subject->code)
+            ->where('semester', $application->semester)
+            ->where('academic_year', $application->academic_year)
+            ->whereIn('session', [$application->session, 'All'])
+            ->where(fn ($query) => $query->where('section', 'All')
+                ->orWhere('section', $application->student?->section ?? ''))
+            ->exists();
+    }
+
+    private function assertNoScheduleClashes(iterable $subjects): void
+    {
+        $subjects = collect($subjects)->values();
+        for ($i = 0; $i < $subjects->count(); $i++) {
+            for ($j = $i + 1; $j < $subjects->count(); $j++) {
+                $first = $subjects[$i];
+                $second = $subjects[$j];
+                if (array_intersect(explode('/', $first->days), explode('/', $second->days)) !== []
+                    && $first->start_time < $second->end_time
+                    && $second->start_time < $first->end_time) {
+                    throw ValidationException::withMessages([
+                        'subjects' => ['Schedule conflict: '.$first->code.' and '.$second->code.' overlap.'],
+                    ]);
+                }
+            }
+        }
     }
 }

@@ -20,6 +20,7 @@ class Subject extends Model
     protected $fillable = [
         'code', 'name', 'units', 'days', 'meeting_time', 'start_time', 'end_time',
         'room', 'program', 'major', 'year_level', 'session', 'semester', 'academic_year',
+        'grade_weights',
     ];
 
     protected function casts(): array
@@ -30,6 +31,7 @@ class Subject extends Model
     public function faculty(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'faculty_subject', 'subject_code', 'faculty_id', 'code')
+            ->withPivot(['id', 'semester', 'academic_year', 'section', 'session', 'days', 'start_time', 'end_time', 'room'])
             ->withTimestamps();
     }
 

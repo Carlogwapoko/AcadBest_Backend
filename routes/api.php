@@ -23,6 +23,7 @@ Route::middleware('api.token')->group(function () {
     Route::get('/portal', [PortalDataController::class, 'index']);
     Route::get('/requests', [ServiceRequestController::class, 'index']);
     Route::get('/enrollments', [EnrollmentController::class, 'index'])->middleware('role:admin,registrar');
+    Route::post('/users', [UserController::class, 'store'])->middleware('role:admin,registrar');
     Route::post('/requests', [ServiceRequestController::class, 'store'])->middleware('role:student');
     Route::put('/grades', [GradeController::class, 'storeBatch'])->middleware('role:faculty,registrar,admin');
     Route::put('/subjects/{subject}', [SubjectController::class, 'update'])->middleware('role:faculty,registrar,admin');
@@ -34,7 +35,6 @@ Route::middleware('api.token')->group(function () {
 
     Route::middleware('role:admin')->group(function () {
         Route::get('/users', [UserController::class, 'index']);
-        Route::post('/users', [UserController::class, 'store']);
         Route::put('/users/{user}', [UserController::class, 'update']);
         Route::delete('/users/{user}', [UserController::class, 'destroy']);
         Route::put('/settings/rules', [SettingsController::class, 'rules']);

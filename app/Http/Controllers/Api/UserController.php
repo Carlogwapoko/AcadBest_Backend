@@ -52,6 +52,10 @@ class UserController extends Controller
         ]);
 
         $role = Role::where('name', $validated['role'])->firstOrFail();
+        if ($request->user()->role?->slug === 'registrar'
+            && ($role->slug !== 'student' || empty($validated['application_ref']))) {
+            abort(403, 'Registrar Staff may only create student accounts for approved enrollment applications.');
+        }
         if ($role->slug === 'student') {
             $application = EnrollmentApplication::where('reference', $validated['application_ref'] ?? '')
                 ->where('status', 'Enrolled')->where('account_issued', false)->first();
@@ -131,7 +135,6 @@ class UserController extends Controller
                     'section' => $validated['section'] ?? $student->section,
                     'session' => $application->session ?? $student->session,
                 ]);
-                $student->subjects()->syncWithoutDetaching($application->requested_subjects ?? []);
                 $application->update(['account_issued' => true, 'user_id' => $user->id]);
                 $application->update(['student_id' => $student->id]);
             }
